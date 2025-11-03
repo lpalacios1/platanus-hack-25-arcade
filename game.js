@@ -12,7 +12,7 @@ const game = new Phaser.Game(config);
 // === Globals ===
 let player, cursors, spaceKey, enterKey, pKey, rKey;
 let bullets, enemyBullets, enemies, crawlers, pixels, hearts, stickies;
-let ammoPacks, ammoClusters, floors;
+let ammoPacks, ammoClusters, floors, powerUps;
 let ammoPackCooldownUntil = 0, ammoPacksDroppedThisLevel = 0;
 let spawnedAirborne = 0, spawnedCrawlers = 0;
 let allowPackThisLevel = false;
@@ -26,7 +26,7 @@ let spawnTimer = 0, lastFired = 0;
 let level = 1;
 let enemiesToSpawn = 0;
 let gameState = 'playing'; // 'playing' | 'levelComplete' | 'levelFailed' | 'gameover'
-let scoreText, ammoText, livesText, scoreProgressBg, scoreProgressBar, overlayText, statsText;
+let scoreText, ammoText, livesText, scoreProgressBg, scoreProgressBar, overlayText, statsText, powerUpText;
 let playerInvincible = false;
 
 // inter-level stats
@@ -35,6 +35,10 @@ let shotsFired = 0, shotsHit = 0;
 // anti-air-abuse (single jump + coyote time)
 let lastGroundedAt = 0;
 const COYOTE_MS = 120;
+let airJumpCharges = 0;
+let enemyUidCounter = 1;
+let powerUpQuotaThisLevel = 0;
+let powerUpsGrantedThisLevel = 0;
 
 // shooting economy / heat
 const MAX_ACTIVE_BULLETS = 30;
@@ -44,10 +48,20 @@ let heat = 0;                    // 0..100
 let overheated = false;
 
 // constants
-const MAX_PIXELS = 100;
 const PIXEL_PICKUP_VALUE = 1;    // value of each tiny ammo (used by clusters too)
 const AMMO_PACK_VALUE = 40;
 const JUMP_VELOCITY = -240;
+const POWER_UP_DURATION = 10000;
+const POWER_UP_TYPES = [
+  { key: 'immunity',    label: 'IMMUNITY',     short: 'IMM', color: 0xff66ff },
+  { key: 'machineGun',  label: 'MACHINE GUN',  short: 'MG',  color: 0xffd500 },
+  { key: 'laser',       label: 'LASER',        short: 'LAS', color: 0x66ffff },
+  { key: 'doubleJump',  label: 'DOUBLE JUMP',  short: 'DJ',  color: 0x88ff66 },
+  { key: 'magnet',      label: 'MAGNET',       short: 'MAG', color: 0xff8844 },
+  { key: 'doubleAmmo',  label: 'DOUBLE AMMO',  short: 'DA',  color: 0xffff66 },
+  { key: 'doublePoints',label: 'DOUBLE PTS',   short: 'DP',  color: 0xff44aa }
+];
+const powerUpTimers = {};
 
 function ammoPackDropChance(lv){ return lv <= 3 ? 0.18 : 0.22; }
 function heartDropChance(lv){ return lv <= 3 ? 0.07 : 0.1; }
@@ -71,8 +85,6 @@ function shouldDropAmmoPack(scene){
 }
 
 // moving floor becomes segmented later
-let floorAmp = 0;
-
 // === Level setup ===
 const levelConfig = [
   { enemies: 15, scoreTarget: 80   }, // need 8/15 kills
@@ -102,54 +114,6 @@ const cowboyPattern = [ // monkey hero (uses '8' and '5')
   '  885588  ',
   '  88  88  ',
   ' 8      8 '
-];
-const enemyPattern1 = [ // 7 x 12
-  '   02  ',
-  '  022  ',
-  ' 02220 ',
-  ' 02220 ',
-  ' 02220 ',
-  '  0220 ',
-  '   022 ',
-  '   022 ',
-  '   022 ',
-  '  022  ',
-  ' 022   ',
-  ' 20    '
-];
-const enemyPattern2 = [ // 8 x 14
-  '    033 ',
-  '   0333 ',
-  '  033330',
-  '  033330',
-  ' 0333330',
-  ' 0333330',
-  '  033330',
-  '   03330',
-  '    0330',
-  '    0330',
-  '   0330 ',
-  '  0330  ',
-  ' 0330   ',
-  ' 30     '
-];
-const enemyPattern3 = [ // 9 x 16
-  '     066 ',
-  '    0666 ',
-  '   066660',
-  '   066660',
-  '  0666660',
-  '  0666660',
-  '  0666660',
-  '   066660',
-  '    06660',
-  '    06660',
-  '    06660',
-  '   06660 ',
-  '  06660  ',
-  ' 06660   ',
-  ' 6660    ',
-  '  60     '
 ];
 const crawlerPattern = [
   '0 44440 0',
@@ -219,6 +183,36 @@ function spendPixels(v){ pixelMeter = Math.max(0, pixelMeter - v); }
 function hasLevelCfg() { return level >= 1 && level <= levelConfig.length; }
 function getLevelCfg() { return hasLevelCfg() ? levelConfig[level - 1] : null; }
 function accuracyPct(){ return shotsPressed ? Math.round((enemiesKilled / shotsPressed)*100) : 0; }
+function isPowerUpActive(key, now){
+  if (now === undefined && typeof game !== 'undefined' && game && game.loop) now = game.loop.now;
+  const expiry = powerUpTimers[key] || 0;
+  return expiry > (now || 0);
+}
+function getPowerUpDef(key){
+  for (let i = 0; i < POWER_UP_TYPES.length; i++) if (POWER_UP_TYPES[i].key === key) return POWER_UP_TYPES[i];
+  return null;
+}
+function decidePowerUpQuota(lv){
+  const opts = [0, 1, 2];
+  let weights;
+  if (lv <= 2) weights = [0.75, 0.25, 0];
+  else if (lv <= 4) weights = [0.4, 0.45, 0.15];
+  else if (lv <= 6) weights = [0.25, 0.45, 0.30];
+  else weights = [0.15, 0.4, 0.45];
+  let roll = Math.random();
+  for (let i = 0; i < opts.length; i++) {
+    const w = weights[i] || 0;
+    if (roll < w) return opts[i];
+    roll -= w;
+  }
+  return 0;
+}
+function powerUpDropChanceForLevel(lv){
+  if (lv <= 2) return 0.09;
+  if (lv <= 4) return 0.12;
+  if (lv <= 6) return 0.16;
+  return 0.2;
+}
 
 function requiredKillRatio(lv){
   // Easier early, ramps to 75%
@@ -260,6 +254,8 @@ function create() {
   shotsFired = 0; shotsHit = 0;
   shotsPressed = 0; enemiesKilled = 0;
   spawnedAirborne = 0; spawnedCrawlers = 0;
+  for (const k in powerUpTimers) delete powerUpTimers[k];
+  airJumpCharges = 0;
 
   // Textures
   const gP = this.add.graphics(); drawPattern(gP, cowboyPattern, 3, { '8': 0x6b4e16, '5': 0xffd19b }); gP.generateTexture('player', 10*3, 9*3); gP.destroy();
@@ -279,6 +275,23 @@ function create() {
   gAC.lineStyle(2,0x9a8700,1).strokeRect(1,1,10,10);
   gAC.generateTexture('ammoCluster',12,12);
   gAC.destroy();
+  const gAP = this.add.graphics();
+  gAP.fillStyle(0xffcc33,1).fillRect(0,0,16,16);
+  gAP.lineStyle(2,0xffffff,1).strokeRect(0,0,16,16);
+  gAP.generateTexture('ammoPack',16,16);
+  gAP.destroy();
+  const gL = this.add.graphics();
+  gL.fillStyle(0x66ffff,1).fillRect(0,0,6,28);
+  gL.generateTexture('laser',6,28);
+  gL.destroy();
+  POWER_UP_TYPES.forEach(def => {
+    const gPU = this.add.graphics();
+    gPU.fillStyle(def.color,1).fillRect(0,0,22,22);
+    gPU.lineStyle(2,0xffffff,1).strokeRect(0,0,22,22);
+    gPU.fillStyle(0x111111,1).fillRect(6,10,10,2);
+    gPU.generateTexture('power_'+def.key,22,22);
+    gPU.destroy();
+  });
 
   // Player
   player = this.physics.add.sprite(400, 520, 'player').setCollideWorldBounds(true);
@@ -304,11 +317,14 @@ function create() {
   floors       = this.physics.add.group();          // segmented moving floor
   ammoPacks    = this.physics.add.group();          // big ammo pickups (40)
   ammoClusters = this.physics.add.group();          // cluster pickups that settle on floor
+  powerUps     = this.physics.add.group();
 
   // UI
   scoreText = this.add.text(16, 12, 'Score: 0', { fontSize: '18px', fill: '#fff' }).setDepth(100);
   ammoText  = this.add.text(16, 34, 'Ammo: 100', { fontSize: '18px', fill: '#ffff66' }).setDepth(100);
   livesText = this.add.text(16, 56, 'Lives: 1', { fontSize: '18px', fill: '#ff8080' }).setDepth(100);
+  powerUpText = this.add.text(400, 54, '', { fontSize: '16px', fill: '#ffcc66', align: 'center' }).setOrigin(0.5,0).setDepth(100);
+  powerUpText.setVisible(false);
 
   scoreProgressBg  = this.add.graphics().fillStyle(0x555555, 1).fillRect(584, 16, 200, 16);
   scoreProgressBar = this.add.graphics();
@@ -344,6 +360,9 @@ function create() {
   // Player collects ammo clusters and ammo packs
   this.physics.add.overlap(player, ammoClusters, playerHitAmmoCluster, null, this);
   this.physics.add.overlap(player, ammoPacks,    playerHitAmmoPack,    null, this);
+  // Power-ups
+  this.physics.add.collider(powerUps, floors, powerUpTouchesFloor, null, this);
+  this.physics.add.overlap(player, powerUps, collectPowerUp, null, this);
 
   startLevel(this);
 }
@@ -366,53 +385,120 @@ function update(time, delta) {
   // Sticky check
   const nowMS = this.time.now;
   const stickyActive = nowMS < (player.getData('slowedUntil') || 0);
+  const immunityActive = isPowerUpActive('immunity', nowMS);
+  const machineGunActive = isPowerUpActive('machineGun', nowMS);
+  const laserActive = isPowerUpActive('laser', nowMS);
+  const magnetActive = isPowerUpActive('magnet', nowMS);
+  const doubleJumpActive = isPowerUpActive('doubleJump', nowMS);
 
   // Movement with sticky effect
   const baseSpeed = 300;
   const speed = stickyActive ? 80 : baseSpeed;
-  if (stickyActive) { player.setDragX(1500); player.setMaxVelocity(160, 1000); player.setTint(0x66ccff); }
-  else { player.setDragX(0); player.setMaxVelocity(500, 2000); player.clearTint(); }
+  if (stickyActive) { player.setDragX(1500); player.setMaxVelocity(160, 1000); }
+  else { player.setDragX(0); player.setMaxVelocity(500, 2000); }
+  if (!immunityActive) {
+    if (stickyActive) player.setTint(0x66ccff); else player.clearTint();
+  }
 
   if (cursors.left.isDown) player.setVelocityX(-speed);
   else if (cursors.right.isDown) player.setVelocityX(speed);
   else if (stickyActive) player.setVelocityX(player.body.velocity.x * 0.9);
   else player.setVelocityX(0);
 
-  // Single jump + coyote
-  if (Phaser.Input.Keyboard.JustDown(cursors.up) && (onGround || time - lastGroundedAt <= COYOTE_MS)) {
-    player.setVelocityY(stickyActive ? JUMP_VELOCITY * 0.8 : JUMP_VELOCITY);
+  if (onGround) {
+    airJumpCharges = doubleJumpActive ? 1 : 0;
+  } else if (!doubleJumpActive) {
+    airJumpCharges = 0;
+  }
+
+  // Single jump + coyote + optional air jump
+  if (Phaser.Input.Keyboard.JustDown(cursors.up)) {
+    const coyote = (onGround || time - lastGroundedAt <= COYOTE_MS);
+    if (coyote) {
+      player.setVelocityY(stickyActive ? JUMP_VELOCITY * 0.8 : JUMP_VELOCITY);
+    } else if (airJumpCharges > 0) {
+      airJumpCharges--;
+      player.setVelocityY(JUMP_VELOCITY);
+    }
   }
 
   // Shooting
-  if (gameState === 'playing' && !overheated && spaceKey.isDown && time > lastFired) {
-    if (pixelMeter > 0 && bullets.countActive(true) < MAX_ACTIVE_BULLETS) {
-      // Ensure we don't exceed global active bullet cap or remaining ammo
-      const canSpawn = Math.max(0, MAX_ACTIVE_BULLETS - bullets.countActive(true));
-      const pellets = Math.min(PELLETS_PER_SHOT, canSpawn, pixelMeter);
+  const autoFire = (machineGunActive || laserActive) && !spaceKey.isDown;
+  if (gameState === 'playing' && time > lastFired && (spaceKey.isDown || autoFire)) {
+    const activeBullets = bullets.countActive(true);
+    const cooldown = machineGunActive ? 120 : (laserActive ? 180 : SHOT_COOLDOWN_MS);
+    const pelletsPerShot = laserActive ? 1 : (machineGunActive ? 1 : PELLETS_PER_SHOT);
+    const hasAmmo = machineGunActive || laserActive || pixelMeter > 0;
 
-      lastFired = time + SHOT_COOLDOWN_MS;
+    if (!overheated && hasAmmo && activeBullets < MAX_ACTIVE_BULLETS) {
+      const canSpawn = Math.max(0, MAX_ACTIVE_BULLETS - activeBullets);
+      let pellets = Math.min(pelletsPerShot, canSpawn);
+      if (!machineGunActive) pellets = Math.min(pellets, pixelMeter);
 
       if (pellets > 0) {
+        lastFired = time + cooldown;
         shotsPressed++;
-        spendPixels(pellets);
+        if (!machineGunActive && !laserActive) spendPixels(pellets);
         shotsFired += pellets;
+
+        if (laserActive) {
+          bullets.children.each(existing => {
+            if (existing.active && existing.getData && existing.getData('beam')) {
+              bullets.killAndHide(existing);
+              if (existing.body) existing.body.enable = false;
+            }
+          });
+        }
 
         for (let i = 0; i < pellets; i++) {
           const b = bullets.get(player.x, player.y - 20);
-          if (b) {
-            b.setActive(true).setVisible(true).setDepth(4);
-            if (b.body) b.body.enable = true; // re-enable pooled body to avoid "stuck" bullets
+          if (!b) continue;
+          b.setActive(true).setVisible(true).setDepth(4);
+          if (b.body) b.body.enable = true;
+          if (laserActive) {
+            b.setTexture('laser');
+            const beamHeight = Math.max(120, player.y);
+            const half = beamHeight * 0.5;
+            b.setDisplaySize(8, beamHeight);
+            if (b.body) {
+              b.body.setSize(8, beamHeight, true);
+              b.body.allowGravity = false;
+              b.body.velocity.x = 0;
+              b.body.velocity.y = 0;
+            }
+            b.x = player.x;
+            b.y = player.y - half;
+            b.setAngle(0);
+            b.setData('damage', 3);
+            b.setData('pierce', 40);
+            b.setData('beam', true);
+            b.setData('beamUntil', time + cooldown - 10);
+          } else {
+            b.setTexture('bullet');
+            b.setDisplaySize(4, 4);
+            if (b.body) b.body.setSize(4, 4, true);
             b.body.velocity.y = -520 + Phaser.Math.Between(-40, 40);
-            b.body.velocity.x = Phaser.Math.Between(-80, 80);
+            b.body.velocity.x = machineGunActive ? Phaser.Math.Between(-20, 20) : Phaser.Math.Between(-80, 80);
+            b.setAngle(0);
+            b.setData('damage', 1);
+            b.setData('pierce', 0);
+            b.setData('beam', false);
+            b.setData('beamUntil', 0);
           }
+          b.setData('lastHitId', 0);
         }
 
-        heat = Math.min(100, heat + 18 * (pellets / PELLETS_PER_SHOT));
-        if (heat >= 100) { overheated = true; showOverlay(this, 'OVERHEATED!', 600); }
+        if (!machineGunActive) {
+          heat = Math.min(100, heat + 18 * (pellets / PELLETS_PER_SHOT));
+          if (heat >= 100) { overheated = true; showOverlay(this, 'OVERHEATED!', 600); }
+        }
       }
+    } else if (hasAmmo) {
+      lastFired = time + cooldown;
     }
   }
-  heat = Math.max(0, heat - (delta * 0.05));
+  if (machineGunActive) { heat = Math.max(0, heat - (delta * 0.15)); overheated = false; }
+  else heat = Math.max(0, heat - (delta * 0.05));
   if (overheated && heat <= 40) overheated = false;
 
   // UI texts
@@ -475,6 +561,11 @@ function update(time, delta) {
     const exp = pk.getData('expiresAt');
     if (exp && nowMS > exp) { ammoPacks.killAndHide(pk); if (pk.body) pk.body.enable = false; }
   });
+  powerUps.children.each(pu => {
+    if (!pu.active) return;
+    const exp = pu.getData('expiresAt');
+    if (exp && nowMS > exp) { powerUps.killAndHide(pu); if (pu.body) pu.body.enable = false; }
+  });
 
   // Level end check
   if (gameState === 'playing'
@@ -488,6 +579,7 @@ function update(time, delta) {
     if (levelScore >= dynTarget) {
       if (level < levelConfig.length) {
         gameState = 'levelComplete';
+        clearPowerUpsForTransition(this);
         showStats(this, `LEVEL ${level} CLEAR`, acc, enemiesKilled, levelScore, 'ENTER: NEXT');
         level++;
         const w = this.time.addEvent({
@@ -502,6 +594,7 @@ function update(time, delta) {
       }
     } else {
       gameState = 'levelFailed';
+      clearPowerUpsForTransition(this);
       showStats(this, `LEVEL ${level} FAILED`, acc, enemiesKilled, levelScore, 'ENTER: RETRY');
       this.physics.pause();
       const w = this.time.addEvent({
@@ -517,15 +610,64 @@ function update(time, delta) {
   // Lose condition
   if (lives <= 0 && !gameOver) {
     gameOver = true; gameState = 'gameover'; this.physics.pause();
+    clearPowerUpsForTransition(this);
     showStats(this, 'GAME OVER', accuracyPct(), enemiesKilled, levelScore, 'ENTER/R: RESTART');
   }
 
-  // Cleanup
-  bullets.children.each(b => { if (b.active && (b.y < -10 || b.x < -10 || b.x > 810)) b.setActive(false).setVisible(false); });
+  // Cleanup + beam upkeep
+  bullets.children.each(b => {
+    if (!b.active) return;
+    if (b.getData && b.getData('beam')) {
+      const until = b.getData('beamUntil') || 0;
+      if (nowMS > until) {
+        bullets.killAndHide(b);
+        if (b.body) b.body.enable = false;
+        return;
+      }
+      const beamHeight = Math.max(120, player ? player.y : 600);
+      const half = beamHeight * 0.5;
+      b.x = player.x;
+      b.y = player.y - half;
+      b.setDisplaySize(8, beamHeight);
+      if (b.body) {
+        b.body.setSize(8, beamHeight, true);
+        b.body.allowGravity = false;
+        b.body.velocity.x = 0;
+        b.body.velocity.y = 0;
+      }
+      return;
+    }
+    if (b.y < -10 || b.x < -10 || b.x > 810) {
+      bullets.killAndHide(b);
+      if (b.body) b.body.enable = false;
+    }
+  });
   enemyBullets.children.each(b => { if (b.active && (b.y > 610 || b.x < -10 || b.x > 810)) b.setActive(false).setVisible(false); });
   pixels.children.each(p => { if (p.active && p.y > 610) p.setActive(false).setVisible(false); });
   enemies.children.each(e => { if (e.active && (e.x < -20 || e.x > 820 || e.y > 620)) e.setActive(false).setVisible(false); });
   crawlers.children.each(c => { if (c.active && (c.x < -30 || c.x > 830 || c.y > 620)) c.setActive(false).setVisible(false); });
+  if (magnetActive) attractPickupsToPlayer(player); else releasePickupAcceleration();
+  syncStuckGroup(pixels);
+  syncStuckGroup(ammoPacks);
+  syncStuckGroup(ammoClusters);
+
+  if (!gameOver && gameState === 'playing' && !machineGunActive && !laserActive && pixelMeter <= 0) {
+    const ammoDrops = totalAmmoPickups();
+    const shotsInAir = bullets.countActive(true);
+    if (ammoDrops === 0 && shotsInAir === 0) {
+      outOfAmmoLose(this);
+    }
+  }
+
+  const rainbowHue = ((nowMS / 80) % 360) / 360;
+  if (immunityActive) {
+    const tint = Phaser.Display.Color.HSVToRGB(rainbowHue, 0.95, 1);
+    player.setTint(tint.color);
+    player.setAlpha(1);
+  } else {
+    player.setAlpha(playerInvincible ? 0.5 : 1);
+  }
+  updatePowerUpText(powerUpText, nowMS);
 }
 
 // === Game logic helpers ===
@@ -533,17 +675,18 @@ function startLevel(scene) {
   const cfg = getLevelCfg(); if (!cfg) return;
   enemiesToSpawn = cfg.enemies;
   levelScore = 0;
-  pixelMeter = Math.min(pixelMeter, MAX_PIXELS);
   shotsFired = 0; shotsHit = 0;
   shotsPressed = 0; enemiesKilled = 0;
   spawnedAirborne = 0; spawnedCrawlers = 0;
   heat = 0; overheated = false;
   clearGroupsForNewLevel(scene);
   buildFloors(scene);
-  floorAmp = level >= 5 ? 40 : 0;
   ammoPacksDroppedThisLevel = 0;
   ammoPackCooldownUntil = 0;
   allowPackThisLevel = Math.random() < 0.5; // ~one pack every two levels on average
+  powerUpQuotaThisLevel = decidePowerUpQuota(level);
+  powerUpsGrantedThisLevel = 0;
+  clearStuckMetadata();
 }
 
 function resetLevelOnly(scene) {
@@ -557,6 +700,9 @@ function resetLevelOnly(scene) {
   clearGroupsForNewLevel(scene);
   buildFloors(scene);
   ammoPacksDroppedThisLevel = 0; // allow packs again on retry
+  powerUpQuotaThisLevel = decidePowerUpQuota(level);
+  powerUpsGrantedThisLevel = 0;
+  clearStuckMetadata();
 }
 
 function clearGroupsForNewLevel(scene) {
@@ -570,10 +716,12 @@ function clearGroupsForNewLevel(scene) {
   floors && floors.clear(true, true);
   ammoPacks && ammoPacks.clear(true, true);
   ammoClusters && ammoClusters.clear(true, true);
+  powerUps && powerUps.clear(true, true);
 }
 
 function endGameWin(scene, acc) {
   gameOver = true; gameState = 'gameover'; scene.physics.pause();
+  clearPowerUpsForTransition(scene);
   showStats(scene, 'YOU WIN!', acc, enemiesKilled, levelScore, 'ENTER/R: RESTART');
 }
 
@@ -588,6 +736,7 @@ function spawnAirEnemy(scene, time) {
   else eType = enemyTypes[Phaser.Math.Between(1, 2)];
 
   const e = enemies.create(x, y, eType.key);
+  e.setData('uid', enemyUidCounter++);
 
   const s = Phaser.Math.FloatBetween(0.9, 1.3);
   e.setScale(s).setDepth(3);
@@ -644,58 +793,78 @@ function enemyShoot(scene, e){
 }
 
 function bulletHitEnemy(bullet, enemy) {
-  bullets.killAndHide(bullet); if (bullet.body) bullet.body.enable = false;
+  if (!bullet.active || !enemy.active) return;
+  const scene = this;
+  const now = scene.time.now;
+  const enemyId = enemy.getData('uid') || 0;
+  if (bullet.getData('lastHitId') === enemyId) return;
+  bullet.setData('lastHitId', enemyId);
+
   shotsHit++;
 
-  enemy.health--;
+  const damage = bullet.getData('damage') || 1;
+  enemy.health -= damage;
   if (enemy.health > 0) {
     const a = 0.4 + 0.6 * (enemy.health / enemy.maxHealth);
     enemy.setAlpha(a);
-    return;
-  }
+  } else {
+    enemies.killAndHide(enemy); if (enemy.body) enemy.body.enable = false;
+    enemiesKilled++;
 
-  // enemy dead
-  enemies.killAndHide(enemy); if (enemy.body) enemy.body.enable = false;
-  enemiesKilled++;
+    const scoreBonus = isPowerUpActive('doublePoints', now) ? 20 : 10;
+    score += scoreBonus; levelScore += scoreBonus;
 
-  score += 10; levelScore += 10;
-
-  // ==== AMMO: drop 8 SINGLE PELLETS in a tight cluster ====
-  // Each pellet is worth 1 ammo. Small offsets keep them close together.
-  for (let i = 0; i < 8; i++) {
-    const ox = Phaser.Math.Between(-8, 8);
+    const ammoMultiplier = isPowerUpActive('doubleAmmo', now) ? 2 : 1;
+    const pellets = 8 * ammoMultiplier;
+    for (let i = 0; i < pellets; i++) {
+      const ox = Phaser.Math.Between(-8, 8);
     const oy = Phaser.Math.Between(-4, 4);
     const p = pixels.create(enemy.x + ox, enemy.y + oy, 'pixel');
     p.setData('value', 1);
+    p.setData('stuck', false);
+    p.setData('stickSeg', null);
+    p.setData('stickOffsetY', 0);
     p.setDepth(2);
     p.setBounce(0.1);
     p.body.allowGravity = true;
     p.body.setGravityY(900);
     p.setVelocity(Phaser.Math.Between(-30, 30), Phaser.Math.Between(40, 120));
-  }
+    }
 
-  // ==== RARE/UNIQUE AMMO PACK (40): gated by low ammo, cooldown, and per-level cap ====
-  if (shouldDropAmmoPack(this)) {
+  if (shouldDropAmmoPack(scene)) {
     const pack = ammoPacks.create(enemy.x, enemy.y, 'ammoPack');
-    pack.setData('value', AMMO_PACK_VALUE);
+    pack.setData('value', AMMO_PACK_VALUE * ammoMultiplier);
+    pack.setData('stuck', false);
+    pack.setData('stickSeg', null);
+    pack.setData('stickOffsetY', 0);
     pack.setDepth(2);
     pack.setBounce(0.2);
     pack.body.allowGravity = true;
     pack.body.setGravityY(900);
-    pack.setVelocity(Phaser.Math.Between(-40,40), Phaser.Math.Between(50,100));
-    ammoPacksDroppedThisLevel += 1;
-    ammoPackCooldownUntil = this.time.now + Phaser.Math.Between(6000, 9000); // 6–9s cooldown
+      pack.setVelocity(Phaser.Math.Between(-40,40), Phaser.Math.Between(50,100));
+      ammoPacksDroppedThisLevel += 1;
+      ammoPackCooldownUntil = scene.time.now + Phaser.Math.Between(6000, 9000);
+    }
+
+    if (Math.random() < heartDropChance(level)) {
+      const h = hearts.create(enemy.x, enemy.y, 'heart');
+      h.setData('collected', false);
+      h.setDepth(2);
+      h.setBounce(0.2);
+      h.body.allowGravity = true;
+      h.body.setGravityY(900);
+      h.setVelocity(Phaser.Math.Between(-40,40), Phaser.Math.Between(60,100));
+    }
+
+    maybeDropPowerUp(scene, enemy.x, enemy.y);
   }
 
-  // hearts still possible
-  if (Math.random() < heartDropChance(level)) {
-    const h = hearts.create(enemy.x, enemy.y, 'heart');
-    h.setData('collected', false);
-    h.setDepth(2);
-    h.setBounce(0.2);
-    h.body.allowGravity = true;
-    h.body.setGravityY(900);
-    h.setVelocity(Phaser.Math.Between(-40,40), Phaser.Math.Between(60,100));
+  let pierce = bullet.getData('pierce') || 0;
+  if (pierce > 0) {
+    bullet.setData('pierce', pierce - 1);
+    bullet.y -= 18;
+  } else {
+    bullets.killAndHide(bullet); if (bullet.body) bullet.body.enable = false;
   }
 }
 
@@ -705,6 +874,11 @@ function ammoClusterTouchesFloor(cluster, seg){
   cluster.body.allowGravity = false;
   cluster.setVelocity(0,0);
   cluster.setBounce(0);
+  cluster.setData('stuck', true);
+  if (cluster.setData) {
+    cluster.setData('stickSeg', seg || null);
+    cluster.setData('stickOffsetY', seg ? (cluster.y - seg.y) : 0);
+  }
 }
 
 // Ammo pack settles on floor: stop moving + no gravity (so it stays)
@@ -713,6 +887,18 @@ function ammoPackTouchesFloor(pack, seg){
   pack.body.allowGravity = false;
   pack.setVelocity(0,0);
   pack.setBounce(0);
+  pack.setData('stuck', true);
+  if (pack.setData) {
+    pack.setData('stickSeg', seg || null);
+    pack.setData('stickOffsetY', seg ? (pack.y - seg.y) : 0);
+  }
+}
+
+function powerUpTouchesFloor(power, seg){
+  if (!power.active) return;
+  power.body.allowGravity = false;
+  power.setVelocity(0,0);
+  power.setBounce(0);
 }
 
 // Single ammo pellet settles on floor
@@ -722,6 +908,11 @@ function ammoPelletTouchesFloor(pellet, seg){
   pellet.setVelocity(0,0);
   pellet.setBounce(0);
   pellet.setData('expiresAt', pellet.scene.time.now + 6000); // 6s to collect
+  pellet.setData('stuck', true);
+  if (pellet.setData) {
+    pellet.setData('stickSeg', seg || null);
+    pellet.setData('stickOffsetY', seg ? (pellet.y - seg.y) : 0);
+  }
 }
 
 // Player collects ammo cluster
@@ -735,8 +926,50 @@ function playerHitAmmoCluster(player, cluster){
 // Ammo pack (40)
 function playerHitAmmoPack(player, pack){
   if (!pack.active) return;
+  const scene = pack.scene;
   ammoPacks.killAndHide(pack); if (pack.body) pack.body.enable = false;
-  addPixels(pack.getData('value') || AMMO_PACK_VALUE);
+  const val = pack.getData('value') || AMMO_PACK_VALUE;
+  if (pixelMeter >= 100) addPixels(val);
+  else pixelMeter = 100;
+  showOverlay(scene, 'MAX AMMO', 500);
+}
+
+function collectPowerUp(player, power){
+  if (!power.active) return;
+  const scene = power.scene;
+  const type = power.getData('type');
+  powerUps.killAndHide(power); if (power.body) power.body.enable = false;
+
+  const now = scene.time.now;
+  const existing = powerUpTimers[type] || 0;
+  const base = existing > now ? existing : now;
+  powerUpTimers[type] = base + POWER_UP_DURATION;
+
+  if (type === 'doubleJump') airJumpCharges = player.body.blocked.down ? 1 : Math.max(airJumpCharges, 1);
+  if (type === 'machineGun') { heat = 0; overheated = false; }
+  if (type === 'immunity') { playerInvincible = false; player.setAlpha(1); }
+
+  const def = getPowerUpDef(type);
+  if (def) showOverlay(scene, 'POWER-UP: ' + def.label, 800);
+  updatePowerUpText(powerUpText, now);
+}
+
+function maybeDropPowerUp(scene, x, y){
+  if (!powerUps) return;
+  if (powerUpsGrantedThisLevel >= powerUpQuotaThisLevel) return;
+  if (powerUps.countActive(true) >= 2) return;
+  if (Math.random() > powerUpDropChanceForLevel(level)) return;
+  const def = Phaser.Utils.Array.GetRandom(POWER_UP_TYPES);
+  if (!def) return;
+  const spr = powerUps.create(x, y, 'power_' + def.key);
+  spr.setData('type', def.key);
+  spr.setData('expiresAt', scene.time.now + 8000);
+  spr.setDepth(2);
+  spr.setBounce(0.25);
+  spr.body.allowGravity = true;
+  spr.body.setGravityY(900);
+  spr.setVelocity(Phaser.Math.Between(-60, 60), Phaser.Math.Between(40, 140));
+  powerUpsGrantedThisLevel += 1;
 }
 
 function playerHitPixel(player, pixel) {
@@ -760,15 +993,15 @@ function onStickyOverlap(player, sticky){
 }
 
 function onPlayerDamagedByEnemy(player, foe) {
-  if (playerInvincible) return;
+  if (playerInvincible || isPowerUpActive('immunity', this.time.now)) return;
   damageLife(this);
 }
 function playerHitCrawler(player, crawler) {
-  if (playerInvincible) return;
+  if (playerInvincible || isPowerUpActive('immunity', this.time.now)) return;
   damageLife(this);
 }
 function onPlayerDamagedByBullet(player, ebullet){
-  if (playerInvincible) return;
+  if (playerInvincible || isPowerUpActive('immunity', this.time.now)) return;
   enemyBullets.killAndHide(ebullet); if (ebullet.body) ebullet.body.enable = false;
   damageLife(this);
 }
@@ -784,6 +1017,16 @@ function damageLife(scene) {
   if (lives <= 0) return;
   playerInvincible = true; player.setAlpha(0.5);
   scene.time.addEvent({ delay: 1000, callback: () => { playerInvincible = false; player.setAlpha(1); } });
+}
+
+function outOfAmmoLose(scene){
+  if (gameOver) return;
+  lives = 0;
+  gameOver = true;
+  gameState = 'gameover';
+  clearPowerUpsForTransition(scene);
+  scene.physics.pause();
+  showStats(scene, 'OUT OF AMMO', accuracyPct(), enemiesKilled, levelScore, 'ENTER/R: RESTART');
 }
 
 function buildFloors(scene){
@@ -875,4 +1118,123 @@ function showStats(scene, title, acc, hits, lvlScore, footer){
 }
 function hideStats(){ overlayText.setVisible(false); statsText.setVisible(false); }
 
-function restartGame(scene) { scene.scene.restart(); }
+function restartGame(scene) {
+  resetGlobalFlags();
+  scene.scene.restart();
+}
+
+function resetGlobalFlags(){
+  paused = false;
+  gameOver = false;
+  playerInvincible = false;
+  overheated = false;
+  heat = 0;
+  for (const key in powerUpTimers) delete powerUpTimers[key];
+}
+
+function clearPowerUpsForTransition(scene){
+  for (const key in powerUpTimers) powerUpTimers[key] = 0;
+  airJumpCharges = 0;
+  releasePickupAcceleration();
+  if (powerUps) powerUps.clear(true, true);
+  if (scene && scene.time) updatePowerUpText(powerUpText, scene.time.now);
+  if (player) {
+    player.clearTint();
+    player.setAlpha(playerInvincible ? 0.5 : 1);
+  }
+}
+
+function totalAmmoPickups(){
+  const pellets = pixels ? pixels.countActive(true) : 0;
+  const packs = ammoPacks ? ammoPacks.countActive(true) : 0;
+  const clusters = ammoClusters ? ammoClusters.countActive(true) : 0;
+  return pellets + packs + clusters;
+}
+
+function syncStuckGroup(group){
+  if (!group) return;
+  group.children.each(item => {
+    if (!item.active) return;
+    if (!item.getData || !item.getData('stuck')) return;
+    const seg = item.getData('stickSeg');
+    if (seg && seg.active) {
+      const offY = item.getData('stickOffsetY') || 0;
+      item.y = seg.y + offY;
+      if (item.body) item.body.updateFromGameObject();
+    }
+  });
+}
+
+function clearStuckMetadata(){
+  [pixels, ammoPacks, ammoClusters].forEach(group => {
+    if (!group) return;
+    group.children.each(item => {
+      if (!item || !item.setData) return;
+      item.setData('stuck', false);
+      item.setData('stickSeg', null);
+      item.setData('stickOffsetY', 0);
+    });
+  });
+}
+
+function pullGroupToward(group, target, speed, lerp){
+  if (!group) return;
+  group.children.each(item => {
+    if (!item.active || !item.body) return;
+    if (item.getData && item.getData('stuck')) return;
+    item.body.allowGravity = false;
+    const dx = target.x - item.x;
+    const dy = target.y - item.y;
+    const dist = Math.max(6, Math.sqrt(dx*dx + dy*dy));
+    const desiredX = (dx / dist) * speed;
+    const desiredY = (dy / dist) * speed;
+    item.body.velocity.x = Phaser.Math.Linear(item.body.velocity.x, desiredX, lerp);
+    item.body.velocity.y = Phaser.Math.Linear(item.body.velocity.y, desiredY, lerp);
+  });
+}
+
+function attractPickupsToPlayer(target){
+  pullGroupToward(pixels, target, 420, 0.35);
+  pullGroupToward(ammoPacks, target, 360, 0.32);
+  pullGroupToward(ammoClusters, target, 360, 0.32);
+}
+
+function releasePickupAcceleration(){
+  restoreGroupPhysics(pixels);
+  restoreGroupPhysics(ammoPacks);
+  restoreGroupPhysics(ammoClusters);
+}
+
+function restoreGroupPhysics(group){
+  if (!group) return;
+  group.children.each(item => {
+    if (!item.body) return;
+    if (item.getData && item.getData('stuck')) return;
+    if (!item.body.allowGravity) {
+      item.body.allowGravity = true;
+      item.body.setAcceleration(0, 0);
+      item.body.velocity.x *= 0.6;
+      item.body.velocity.y *= 0.6;
+    }
+  });
+}
+
+function updatePowerUpText(textObj, now){
+  if (!textObj) return;
+  const active = [];
+  for (let i = 0; i < POWER_UP_TYPES.length; i++) {
+    const def = POWER_UP_TYPES[i];
+    const expiry = powerUpTimers[def.key] || 0;
+    if (expiry > now) {
+      const remaining = Math.max(0, Math.ceil((expiry - now) / 1000));
+      active.push(def.short + ' ' + remaining + 's');
+    }
+  }
+  if (active.length > 0) {
+    textObj.setText(active.join('  '));
+    textObj.setVisible(true);
+  } else {
+    textObj.setText('');
+    textObj.setVisible(false);
+  }
+}
