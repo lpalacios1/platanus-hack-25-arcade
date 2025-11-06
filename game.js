@@ -10,7 +10,7 @@ const config = {
 const game = new Phaser.Game(config);
 
 // === Globals ===
-let player, cursors, spaceKey, enterKey, pKey, rKey, cheatAllKey, cheatLevelKey, cheatLivesKey;
+let player, cursors, spaceKey, enterKey, escKey, cheatPowerKey, cheatLevelKey, cheatLivesKey;
 let bullets, enemyBullets, enemies, crawlers, pixels, hearts, stickies;
 let ammoPacks, ammoClusters, floors, powerUps;
 let ammoPackCooldownUntil = 0, ammoPacksDroppedThisLevel = 0;
@@ -39,6 +39,9 @@ let scoreText, ammoText, livesText, scoreProgressBg, scoreProgressBar, overlayTe
 let playerInvincible = false;
 let glitchUnlimitedLives = false;
 let levelWrapReadyAt = 0;
+let upgradeAmmo = 0, upgradeCooling = 0, upgradePower = 0;
+let upgradePending = false, upgradeMenuActive = false;
+let bgmOsc = null, bgmGain = null;
 
 // inter-level stats
 let shotsFired = 0, shotsHit = 0;
@@ -190,7 +193,8 @@ function drawPattern(g, pattern, px, colorMap) {
       if (pattern[y][x] !== ' ')
         g.fillStyle(colorMap[pattern[y][x]], 1).fillRect(x * px, y * px, px, px);
 }
-function addPixels(v)  { pixelMeter = Math.max(0, pixelMeter + v); }
+function getAmmoCap(){ return 100 + upgradeAmmo * 20; }
+function addPixels(v)  { pixelMeter = Math.min(getAmmoCap(), Math.max(0, pixelMeter + v)); }
 function spendPixels(v){ pixelMeter = Math.max(0, pixelMeter - v); }
 function hasLevelCfg() { return level >= 1 && level <= levelConfig.length; }
 function getLevelCfg() { return hasLevelCfg() ? levelConfig[level - 1] : null; }
@@ -284,6 +288,8 @@ function initializeSessionState(){
   overdriveMeter = 0; overdriveActive = false; overdriveUntil = 0;
   glitchUnlimitedLives = false;
   levelWrapReadyAt = 0;
+  upgradeAmmo = 0; upgradeCooling = 0; upgradePower = 0;
+  upgradePending = false; upgradeMenuActive = false;
 }
 
 function createProceduralTextures(scene){
@@ -357,11 +363,10 @@ function configureInput(scene){
   cursors = scene.input.keyboard.createCursorKeys();
   spaceKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
   enterKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ENTER);
-  pKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.P);
-  rKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.R);
-  cheatAllKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F1);
-  cheatLevelKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F2);
-  cheatLivesKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.F3);
+  escKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ESC);
+  cheatPowerKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.C);
+  cheatLevelKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.L);
+  cheatLivesKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.U);
 }
 
 function createPhysicsGroups(scene){
@@ -432,25 +437,28 @@ function create() {
   createPhysicsGroups(this);
   createUI(this);
   setupCollisions(this);
+  startBackgroundMusic(this);
   startLevel(this);
   updateComboIndicators(this, this.time.now);
 }
 function update(time, delta) {
-  if (Phaser.Input.Keyboard.JustDown(pKey)) togglePause(this);
-  if (paused) { if (Phaser.Input.Keyboard.JustDown(rKey)) restartGame(this); return; }
+  if (Phaser.Input.Keyboard.JustDown(escKey)) togglePause(this);
+  if (paused) { if (Phaser.Input.Keyboard.JustDown(spaceKey)) restartGame(this); return; }
 
   if (gameOver) {
-    if (Phaser.Input.Keyboard.JustDown(enterKey) || Phaser.Input.Keyboard.JustDown(rKey)) restartGame(this);
+    if (Phaser.Input.Keyboard.JustDown(spaceKey) || Phaser.Input.Keyboard.JustDown(enterKey)) restartGame(this);
     return;
   }
 
   if (gameState === 'levelComplete') {
-    if (Phaser.Input.Keyboard.JustDown(enterKey)) {
+    if (upgradePending && (Phaser.Input.Keyboard.JustDown(enterKey) || Phaser.Input.Keyboard.JustDown(spaceKey))) openUpgradeMenu(this);
+    else if (!upgradePending && (Phaser.Input.Keyboard.JustDown(enterKey) || Phaser.Input.Keyboard.JustDown(spaceKey))) {
       hideStats();
       gameState = 'playing';
       startLevel(this);
     }
   }
+  if (gameState === 'upgrade') return;
   if (gameState === 'levelFailed') {
     if (Phaser.Input.Keyboard.JustDown(enterKey)) {
       this.physics.resume();
@@ -479,8 +487,10 @@ function update(time, delta) {
   pruneExpiredPowerUps(nowMS);
   const machineGunTier = machineGunActive ? getPowerUpTier('machineGun') : 0;
   const laserTier = laserActive ? getPowerUpTier('laser') : 0;
+  const heatGain = Math.max(0.55, 1 - upgradeCooling * 0.12);
+  const coolingBoost = 1 + upgradeCooling * 0.18;
 
-  if (cheatAllKey && Phaser.Input.Keyboard.JustDown(cheatAllKey)) openCheatPowerSelect(this);
+  if (cheatPowerKey && Phaser.Input.Keyboard.JustDown(cheatPowerKey)) openCheatPowerSelect(this);
   if (cheatLevelKey && Phaser.Input.Keyboard.JustDown(cheatLevelKey)) cheatJumpToLevel(this);
   if (cheatLivesKey && Phaser.Input.Keyboard.JustDown(cheatLivesKey)) toggleUnlimitedLivesGlitch(this);
 
@@ -553,6 +563,8 @@ function update(time, delta) {
         shotsPressed++;
         if (!machineGunActive && !laserActive) spendPixels(pellets);
         shotsFired += pellets;
+        const fxFreq = laserActive ? 540 : machineGunActive ? 360 : 420;
+        playFx(this, fxFreq, laserActive ? 0.22 : 0.08, laserActive ? 0.05 : 0.07);
 
         if (laserActive) {
           bullets.children.each(existing => {
@@ -583,7 +595,7 @@ function update(time, delta) {
             b.x = player.x;
             b.y = player.y - half;
             b.setAngle(0);
-            const laserDamage = 3 + Math.max(0, laserTier - 1) * 2 + overdriveDamageBonus;
+            const laserDamage = 3 + Math.max(0, laserTier - 1) * 2 + overdriveDamageBonus + upgradePower;
             const laserPierce = 40 + (laserTier > 0 ? (laserTier * 18) : 0) + overdrivePierceBonus * 12;
             b.setData('damage', laserDamage);
             b.setData('pierce', laserPierce);
@@ -603,7 +615,7 @@ function update(time, delta) {
               b.body.velocity.x = Phaser.Math.Between(-80, 80);
             }
             b.setAngle(0);
-            const bonusDamage = (machineGunActive ? Math.max(0, machineGunTier - 1) : 0) + overdriveDamageBonus;
+            const bonusDamage = (machineGunActive ? Math.max(0, machineGunTier - 1) : 0) + overdriveDamageBonus + upgradePower;
             const baseDamage = 1 + bonusDamage;
             const pierceBonus = (machineGunActive ? Math.max(0, machineGunTier - 1) : 0) + overdrivePierceBonus;
             b.setData('damage', baseDamage);
@@ -615,7 +627,7 @@ function update(time, delta) {
         }
 
         if (!machineGunActive) {
-          heat = Math.min(100, heat + 18 * (pellets / PELLETS_PER_SHOT));
+          heat = Math.min(100, heat + 18 * heatGain * (pellets / PELLETS_PER_SHOT));
           if (heat >= 100) { overheated = true; showOverlay(this, 'OVERHEATED!', 600); }
         }
       }
@@ -623,10 +635,10 @@ function update(time, delta) {
       lastFired = time + cooldown;
     }
   }
-  if (machineGunActive) { heat = Math.max(0, heat - (delta * 0.15)); overheated = false; }
+  if (machineGunActive) { heat = Math.max(0, heat - (delta * 0.15 * coolingBoost)); overheated = false; }
   else {
     const coolRate = overdriveActive ? 0.08 : 0.05;
-    heat = Math.max(0, heat - (delta * coolRate));
+    heat = Math.max(0, heat - (delta * coolRate * coolingBoost));
   }
   if (overheated && heat <= 40) overheated = false;
 
@@ -807,6 +819,7 @@ function startLevel(scene) {
   shotsPressed = 0; enemiesKilled = 0;
   spawnedAirborne = 0; spawnedCrawlers = 0;
   heat = 0; overheated = false;
+  pixelMeter = Math.min(getAmmoCap(), pixelMeter + upgradeAmmo * 10);
   clearGroupsForNewLevel(scene);
   buildFloors(scene);
   ammoPacksDroppedThisLevel = 0;
@@ -831,7 +844,7 @@ function resetLevelOnly(scene) {
   shotsPressed = 0; enemiesKilled = 0;
   spawnedAirborne = 0; spawnedCrawlers = 0;
   heat = 0; overheated = false;
-  pixelMeter = Math.max(30, pixelMeter);
+  pixelMeter = Math.min(getAmmoCap(), Math.max(30, pixelMeter + upgradeAmmo * 6));
   clearGroupsForNewLevel(scene);
   buildFloors(scene);
   ammoPacksDroppedThisLevel = 0; // allow packs again on retry
@@ -1172,8 +1185,9 @@ function playerHitAmmoPack(player, pack){
   const scene = pack.scene;
   ammoPacks.killAndHide(pack); if (pack.body) pack.body.enable = false;
   const val = pack.getData('value') || AMMO_PACK_VALUE;
-  if (pixelMeter >= 100) addPixels(val);
-  else pixelMeter = 100;
+  const cap = getAmmoCap();
+  if (pixelMeter >= cap) addPixels(val);
+  else pixelMeter = cap;
   showOverlay(scene, 'MAX AMMO', 500);
 }
 
@@ -1191,6 +1205,52 @@ function playerOnMovingFloor(player, seg){
   if (body.velocity.y > 0) body.velocity.y = 0;
   body.blocked.down = true;
   body.touching.down = true;
+}
+
+function openUpgradeMenu(scene){
+  if (upgradeMenuActive) return;
+  upgradeMenuActive = true;
+  upgradePending = false;
+  gameState = 'upgrade';
+  scene.physics.pause();
+  statsText.setVisible(false);
+  overlayText.setText('UPGRADE\nA Ammo+20\nS Cool-heat\nD Power+dmg\nSpace Skip');
+  overlayText.setVisible(true);
+  const keyboard = scene.input && scene.input.keyboard;
+  const handler = evt => {
+    if (!upgradeMenuActive) return;
+    const key = evt.key.toLowerCase();
+    if (key === 'a' || key === 's' || key === 'd' || key === ' ') finalizeUpgradeSelection(scene, key);
+  };
+  if (keyboard) keyboard.on('keydown', handler);
+}
+
+function finalizeUpgradeSelection(scene, key){
+  upgradeMenuActive = false;
+  let message = 'Skip';
+  const option = key === 'a' ? 1 : key === 's' ? 2 : key === 'd' ? 3 : 0;
+  if (option === 1) {
+    if (upgradeAmmo < 3) {
+      upgradeAmmo++;
+      message = `Ammo T${upgradeAmmo}`;
+    } else message = 'Ammo MAX';
+  } else if (option === 2) {
+    if (upgradeCooling < 3) {
+      upgradeCooling++;
+      message = `Cooling T${upgradeCooling}`;
+    } else message = 'Cooling MAX';
+  } else if (option === 3) {
+    if (upgradePower < 3) {
+      upgradePower++;
+      message = `Power T${upgradePower}`;
+    } else message = 'Power MAX';
+  }
+  overlayText.setVisible(false);
+  statsText.setVisible(false);
+  scene.physics.resume();
+  gameState = 'playing';
+  showOverlay(scene, message, 800);
+  startLevel(scene);
 }
 
 function collectPowerUp(player, power){
@@ -1438,7 +1498,8 @@ function heartTouchesFloor(heart, seg){
 function togglePause(scene) {
   paused = !paused;
   scene.physics.world.isPaused = paused;
-  overlayText.setText(paused ? 'PAUSED\nP: RESUME   R: RESTART' : '');
+  if (paused) overlayText.setText('PAUSED\nESC: RESUME   SPACE: RESTART');
+  else overlayText.setText('');
   overlayText.setVisible(paused);
   statsText.setVisible(false);
 }
@@ -1480,6 +1541,8 @@ function resetGlobalFlags(scene){
   hazardSafeWindow = null;
   if (hazardSafeZoneSprite) { hazardSafeZoneSprite.destroy(); hazardSafeZoneSprite = null; }
   levelWrapReadyAt = 0;
+  upgradePending = false;
+  upgradeMenuActive = false;
   if (player) { player.setAlpha(1); player.clearTint(); }
   setFloorHazardState(scene || (player && player.scene) || null, false);
   for (const key in powerUpTimers) delete powerUpTimers[key];
@@ -1777,7 +1840,8 @@ function maybeFinalizeLevel(scene, now, hostilesRemaining){
       if (levelScore >= dynTarget) {
         gameState = 'levelComplete';
         clearPowerUpsForTransition(scene);
-        showStats(scene, `LEVEL ${level} CLEAR`, acc, enemiesKilled, levelScore, 'ENTER: NEXT');
+        upgradePending = true;
+        showStats(scene, `LEVEL ${level} CLEAR`, acc, enemiesKilled, levelScore, 'ENTER');
         level++;
       } else {
         gameState = 'levelFailed';
@@ -2126,6 +2190,39 @@ function restoreGroupPhysics(group){
       item.body.velocity.y *= 0.6;
     }
   });
+}
+
+function startBackgroundMusic(scene){
+  if (!scene.sound || !scene.sound.context) return;
+  if (bgmOsc) return;
+  if (scene.sound.locked) { scene.sound.once('unlocked', () => startBackgroundMusic(scene)); return; }
+  const ctx = scene.sound.context;
+  bgmGain = ctx.createGain();
+  bgmGain.gain.value = 0.02;
+  bgmOsc = ctx.createOscillator();
+  bgmOsc.type = 'sine';
+  const base = 176;
+  bgmOsc.frequency.setValueAtTime(base, ctx.currentTime);
+  bgmOsc.detune.value = 6;
+  bgmOsc.connect(bgmGain).connect(ctx.destination);
+  bgmOsc.start();
+}
+
+function playFx(scene, freq, d=0.12, v=0.07){
+  if (!scene.sound || scene.sound.locked) return;
+  const ctx = scene.sound.context;
+  const o = ctx.createOscillator();
+  const g = ctx.createGain();
+  o.type = 'square';
+  o.frequency.value = freq;
+  g.gain.value = v;
+  o.connect(g).connect(ctx.destination);
+  const t = ctx.currentTime;
+  g.gain.setValueAtTime(v, t);
+  g.gain.linearRampToValueAtTime(0.0001, t + d);
+  o.start(t);
+  o.stop(t + d);
+  o.onended = () => g.disconnect();
 }
 
 function updatePowerUpText(textObj, now){
