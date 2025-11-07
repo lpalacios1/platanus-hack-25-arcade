@@ -10,7 +10,7 @@ const config = {
 const game = new Phaser.Game(config);
 
 // === Globals ===
-let player, cursors, spaceKey, enterKey, escKey, cheatPowerKey, cheatLevelKey, cheatLivesKey;
+let player, cursors, spaceKey, enterKey, pauseKey, cheatPowerKey, cheatLevelKey, cheatLivesKey;
 let bullets, enemyBullets, enemies, crawlers, pixels, hearts, stickies;
 let ammoPacks, ammoClusters, floors, powerUps;
 let ammoPackCooldownUntil = 0, ammoPacksDroppedThisLevel = 0;
@@ -41,8 +41,9 @@ let glitchUnlimitedLives = false;
 let levelWrapReadyAt = 0;
 let upgradeAmmo = 0, upgradeCooling = 0, upgradePower = 0;
 let upgradePending = false, upgradeMenuActive = false;
-const PAUSE_BASE_TEXT = 'PAUSED\nESC: RESUME   SPACE: RESTART';
-
+let upKeyH = null;
+let cc=0;
+const PAUSE_BASE_TEXT = 'PAUSE O=GO J=RST';
 // inter-level stats
 let shotsFired = 0, shotsHit = 0;
 
@@ -73,13 +74,14 @@ const tune = {
   heatFloor: 0.55,
   heatStep: 0.12,
   coolStep: 0.18,
-  comboBase: 2400,
-  comboStep: 260,
-  comboCap: 2200,
-  overdriveFill: 7,
-  overdriveFillScale: 1.5,
-  overdriveScore: 1.5
+  cBase: 2400,
+  cStep: 260,
+  cCap: 2200,
+  oFill: 7,
+  oScale: 1.5,
+  oScore: 1.5
 };
+const P1_MAP = { u:'w', d:'s', l:'a', r:'d', a:'u', b:'i', c:'o', x:'j', y:'k', z:'l' };
 const POWER_UP_TYPES = [
   { key: 'immunity',    label: 'IMMUNITY',     short: 'IMM', color: 0xff66ff },
   { key: 'machineGun',  label: 'MACHINE GUN',  short: 'MG',  color: 0xffd500 },
@@ -374,13 +376,37 @@ function createPlayerSprite(scene){
 }
 
 function configureInput(scene){
-  cursors = scene.input.keyboard.createCursorKeys();
-  spaceKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.SPACE);
-  enterKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ENTER);
-  escKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.ESC);
-  cheatPowerKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.C);
-  cheatLevelKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.L);
-  cheatLivesKey = scene.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.U);
+  const K = Phaser.Input.Keyboard.KeyCodes;
+  cursors = {
+    up: scene.input.keyboard.addKey(K.W),
+    down: scene.input.keyboard.addKey(K.S),
+    left: scene.input.keyboard.addKey(K.A),
+    right: scene.input.keyboard.addKey(K.D)
+  };
+  spaceKey = scene.input.keyboard.addKey(K.J);
+  enterKey = scene.input.keyboard.addKey(K.ENTER);
+  pauseKey = scene.input.keyboard.addKey(K.O);
+  cheatPowerKey = scene.input.keyboard.addKey(K.C);
+  cheatLevelKey = scene.input.keyboard.addKey(K.L);
+  cheatLivesKey = scene.input.keyboard.addKey(K.U);
+}
+
+function armCheatCooldown(scene){
+  const base = scene && scene.time ? scene.time.now : 0;
+  cc = base + 250;
+}
+
+function calmC(scene){
+  if (spaceKey && spaceKey.reset) spaceKey.reset();
+  armCheatCooldown(scene);
+}
+
+function normKey(value){
+  if (!value) return '';
+  const raw = value.toLowerCase();
+  if (raw.startsWith('p1') && P1_MAP[raw[2]]) return P1_MAP[raw[2]];
+  if (raw === 'start1') return 'enter';
+  return raw;
 }
 
 function createPhysicsGroups(scene){
@@ -455,7 +481,8 @@ function create() {
   updateComboIndicators(this, this.time.now);
 }
 function update(time, delta) {
-  if (Phaser.Input.Keyboard.JustDown(escKey)) togglePause(this);
+  if (Phaser.Input.Keyboard.JustDown(pauseKey) ||
+     ((gameState === 'playing' || paused) && Phaser.Input.Keyboard.JustDown(enterKey))) togglePause(this);
   if (paused) { if (Phaser.Input.Keyboard.JustDown(spaceKey)) restartGame(this); return; }
 
   if (gameOver) {
@@ -500,9 +527,9 @@ function update(time, delta) {
   const heatGain = Math.max(tune.heatFloor, 1 - upgradeCooling * tune.heatStep);
   const coolingBoost = 1 + upgradeCooling * tune.coolStep;
 
-  if (cheatPowerKey && Phaser.Input.Keyboard.JustDown(cheatPowerKey)) openCheatPowerSelect(this);
-  if (cheatLevelKey && Phaser.Input.Keyboard.JustDown(cheatLevelKey)) cheatJumpToLevel(this);
-  if (cheatLivesKey && Phaser.Input.Keyboard.JustDown(cheatLivesKey)) toggleUnlimitedLivesGlitch(this);
+  if (cheatPowerKey && Phaser.Input.Keyboard.JustDown(cheatPowerKey) && nowMS > cc) openCheatPowerSelect(this);
+  if (cheatLevelKey && Phaser.Input.Keyboard.JustDown(cheatLevelKey) && nowMS > cc) cheatJumpToLevel(this);
+  if (cheatLivesKey && Phaser.Input.Keyboard.JustDown(cheatLivesKey) && nowMS > cc) toggleUnlimitedLivesGlitch(this);
 
   // Movement with sticky effect
   const baseSpeed = overdriveActive ? 380 : 300;
@@ -545,8 +572,9 @@ function update(time, delta) {
   }
 
   // Shooting
-  const autoFire = (machineGunActive || laserActive) && !spaceKey.isDown;
-  if (gameState === 'playing' && time > lastFired && (spaceKey.isDown || autoFire)) {
+  const fireHeld = spaceKey.isDown;
+  const autoFire = (machineGunActive || laserActive) && !fireHeld;
+  if (gameState === 'playing' && time > lastFired && (fireHeld || autoFire)) {
     const activeBullets = bullets.countActive(true);
     let cooldown = SHOT_COOLDOWN_MS;
     if (machineGunActive) {
@@ -1201,21 +1229,32 @@ function openUpgradeMenu(scene){
   gameState = 'upgrade';
   scene.physics.pause();
   statsText.setVisible(false);
-  overlayText.setText('UPGRADES STACK\nA Ammo Cap +20\nS Cooling Boost\nD Power Boost\nSPACE Skip');
+  overlayText.setText('U AM\nI CL\nO PW\nL SK');
   overlayText.setVisible(true);
   const keyboard = scene.input && scene.input.keyboard;
   const handler = evt => {
     if (!upgradeMenuActive) return;
     const key = evt.key.toLowerCase();
-    if (key === 'a' || key === 's' || key === 'd' || key === ' ') finalizeUpgradeSelection(scene, key);
+    if (key === 'a' || key === 'u') finalizeUpgradeSelection(scene, 'u');
+    else if (key === 's' || key === 'i') finalizeUpgradeSelection(scene, 'i');
+    else if (key === 'd' || key === 'o') finalizeUpgradeSelection(scene, 'o');
+    else if (key === ' ' || key === 'l') finalizeUpgradeSelection(scene, 'l');
   };
+  upKeyH = handler;
   if (keyboard) keyboard.on('keydown', handler);
 }
 
 function finalizeUpgradeSelection(scene, key){
   upgradeMenuActive = false;
+  if (upKeyH && scene.input && scene.input.keyboard){
+    scene.input.keyboard.off('keydown', upKeyH);
+    upKeyH = null;
+  }
   let message = 'Skip';
-  const option = key === 'a' ? 1 : key === 's' ? 2 : key === 'd' ? 3 : 0;
+  let option = 0;
+  if (key === 'u') option = 1;
+  else if (key === 'i') option = 2;
+  else if (key === 'o') option = 3;
   if (option === 1) {
     upgradeAmmo++;
     message = `Ammo Cap ${getAmmoCap()}`;
@@ -1881,9 +1920,9 @@ function pruneExpiredPowerUps(now){
 function registerKill(scene, now){
   comboCount += 1;
   comboMultiplier = Math.min(6, 1 + Math.floor(comboCount / 6));
-  const bonusWindow = Math.min(tune.comboCap, comboMultiplier * tune.comboStep);
-  comboExpireAt = now + tune.comboBase + bonusWindow;
-  const fill = tune.overdriveFill + comboMultiplier * tune.overdriveFillScale;
+  const bonusWindow = Math.min(tune.cCap, comboMultiplier * tune.cStep);
+  comboExpireAt = now + tune.cBase + bonusWindow;
+  const fill = tune.oFill + comboMultiplier * tune.oScale;
   overdriveMeter = Math.min(120, overdriveMeter + fill);
   if (overdriveActive) {
     overdriveUntil = Math.min(overdriveUntil + 450, now + 9000);
@@ -1940,7 +1979,7 @@ function getScoreMultiplier(now){
   if (isPowerUpActive('doublePoints', now)){
     mult *= dpTier >= 3 ? 4 : dpTier === 2 ? 3 : 2;
   }
-  if (overdriveActive) mult *= tune.overdriveScore;
+  if (overdriveActive) mult *= tune.oScore;
   mult *= 1 + (comboMultiplier - 1) * 0.18;
   return mult;
 }
@@ -1996,26 +2035,22 @@ function openCheatPowerSelect(scene){
     if (isPowerUpActive(POWER_UP_TYPES[i].key, now)) selected.add(i);
   }
 
+  let cursor = 0;
   const helper = scene.add.text(400, 300, '', {
     fontSize: '22px',
     fill: '#ffec99',
-    align: 'center',
-    backgroundColor: '#000000',
-    padding: { x: 12, y: 12 }
+    backgroundColor: '#000'
   }).setOrigin(0.5).setDepth(200);
 
   const render = () => {
-    const lines = [
-      'CHEAT: POWER SELECT',
-      '1-7 toggle, 0 clear, A all, ENTER apply, ESC cancel',
-      ''
-    ];
+    let txt = 'WS J/U TG K OK L BK';
     for (let i = 0; i < POWER_UP_TYPES.length; i++) {
       const def = POWER_UP_TYPES[i];
-      const marker = selected.has(i) ? '[X]' : '[ ]';
-      lines.push(`${i + 1}. ${marker} ${def.label}`);
+      const marker = selected.has(i) ? '+' : '-';
+      const pointer = i === cursor ? '>' : ' ';
+      txt += `\n${pointer}${marker}${def.short}`;
     }
-    helper.setText(lines.join('\n'));
+    helper.setText(txt);
   };
   render();
 
@@ -2023,6 +2058,7 @@ function openCheatPowerSelect(scene){
     scene.input.keyboard.off('keydown', keyHandler);
     helper.destroy();
     hideStats();
+    calmC(scene);
     if (!physicsWasPaused) scene.physics.resume();
     else scene.physics.pause();
     paused = prevPause;
@@ -2059,31 +2095,30 @@ function openCheatPowerSelect(scene){
     }
     if (magnetIndex >= 0 && !selected.has(magnetIndex)) releasePickupAcceleration();
     updatePowerUpText(powerUpText, scene.time.now);
-    const msg = appliedCount > 0 ? `CHEAT: ${appliedCount} POWER UPS READY` : 'CHEAT CLEARED';
+    const msg = appliedCount > 0 ? `CHEAT ${appliedCount}` : 'CHEAT OFF';
     finalize(msg);
   };
 
-  const cancel = () => finalize('CHEAT CANCELLED');
+  const cancel = () => finalize('CHEAT CANX');
+
+  const moveCursor = dir => {
+    const count = POWER_UP_TYPES.length;
+    cursor = (cursor + dir + count) % count;
+    render();
+  };
+
+  const toggleCursor = () => {
+    if (selected.has(cursor)) selected.delete(cursor); else selected.add(cursor);
+    render();
+  };
 
   const keyHandler = evt => {
-    if (evt.key >= '1' && evt.key <= String(POWER_UP_TYPES.length)) {
-      const idx = parseInt(evt.key, 10) - 1;
-      if (selected.has(idx)) selected.delete(idx); else selected.add(idx);
-      render();
-    } else if (evt.key === '0') {
-      selected.clear();
-      render();
-    } else if (evt.key === 'a' || evt.key === 'A') {
-      selected.clear();
-      for (let i = 0; i < POWER_UP_TYPES.length; i++) selected.add(i);
-      render();
-    } else if (evt.key === 'Enter') {
-      scene.input.keyboard.off('keydown', keyHandler);
-      applySelection();
-    } else if (evt.key === 'Escape') {
-      scene.input.keyboard.off('keydown', keyHandler);
-      cancel();
-    }
+    const key = normKey(evt.key);
+    if (key === 'w') moveCursor(-1);
+    else if (key === 's') moveCursor(1);
+    else if (key === 'j' || key === 'u') toggleCursor();
+    else if (key === 'k' || key === 'enter') applySelection();
+    else if (key === 'l' || key === 'escape') cancel();
   };
 
   scene.input.keyboard.on('keydown', keyHandler);
@@ -2113,16 +2148,24 @@ function cheatJumpToLevel(scene){
   const helper = scene.add.text(400, 300, '', {
     fontSize: '24px',
     fill: '#ffff66',
-    align: 'center',
-    backgroundColor: '#000000'
+    backgroundColor: '#000'
   }).setOrigin(0.5).setDepth(200);
 
-  const baseMsg = `CHEAT LEVEL\nType any level >=1 and press ENTER\nESC to cancel`;
-  let digits = '';
-  const render = () => helper.setText(`${baseMsg}\n> ${digits}`);
+  let targetLevel = Math.max(1, level);
+  const render = () => {
+    helper.setText(`LVL${targetLevel}\nWS+/-1\nJ/EN OK L BK`);
+  };
   render();
 
-  const finalize = targetLevel => {
+  let keyHandler;
+  const closeCheatPrompt = () => {
+    if (keyHandler) scene.input.keyboard.off('keydown', keyHandler);
+    helper.destroy();
+    hideStats();
+  };
+
+  const applyTarget = () => {
+    closeCheatPrompt();
     level = Math.max(1, targetLevel);
     clearPowerUpsForTransition(scene);
     pixelMeter = 100;
@@ -2145,9 +2188,11 @@ function cheatJumpToLevel(scene){
         callback: () => { if (paused) refreshPauseOverlay(); }
       });
     } else showOverlay(scene, msg, 800);
+    calmC(scene);
   };
 
   const cancel = msg => {
+    closeCheatPrompt();
     if (physicsWasPaused) scene.physics.pause(); else scene.physics.resume();
     paused = prevPause;
     gameState = prevGameState;
@@ -2163,28 +2208,20 @@ function cheatJumpToLevel(scene){
     } else if (msg) {
       showOverlay(scene, msg, 600);
     } else hideOverlay();
+    calmC(scene);
   };
 
-  const keyHandler = evt => {
-    if (evt.key >= '0' && evt.key <= '9') {
-      digits += evt.key;
-      render();
-    } else if (evt.key === 'Backspace') {
-      digits = digits.slice(0, -1);
-      render();
-    } else if (evt.key === 'Enter') {
-      const num = parseInt(digits, 10);
-      scene.input.keyboard.off('keydown', keyHandler);
-      helper.destroy();
-      hideStats();
-      if (!Number.isNaN(num)) finalize(num);
-      else cancel('CHEAT CANCELLED');
-    } else if (evt.key === 'Escape') {
-      scene.input.keyboard.off('keydown', keyHandler);
-      helper.destroy();
-      hideStats();
-      cancel('CHEAT CANCELLED');
-    }
+  const adjustLevel = delta => {
+    targetLevel = Math.max(1, targetLevel + delta);
+    render();
+  };
+
+  keyHandler = evt => {
+    const key = normKey(evt.key);
+    if (key === 'w') adjustLevel(1);
+    else if (key === 's') adjustLevel(-1);
+    else if (key === 'j' || key === 'enter') applyTarget();
+    else if (key === 'l' || key === 'escape') cancel('CHEAT CANX');
   };
 
   scene.input.keyboard.on('keydown', keyHandler);
