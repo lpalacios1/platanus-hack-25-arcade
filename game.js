@@ -41,7 +41,7 @@ let glitchUnlimitedLives = false;
 let levelWrapReadyAt = 0;
 let upgradeAmmo = 0, upgradeCooling = 0, upgradePower = 0;
 let upgradePending = false, upgradeMenuActive = false;
-let bgmOsc = null, bgmGain = null;
+const PAUSE_BASE_TEXT = 'PAUSED\nESC: RESUME   SPACE: RESTART';
 
 // inter-level stats
 let shotsFired = 0, shotsHit = 0;
@@ -437,7 +437,6 @@ function create() {
   createPhysicsGroups(this);
   createUI(this);
   setupCollisions(this);
-  startBackgroundMusic(this);
   startLevel(this);
   updateComboIndicators(this, this.time.now);
 }
@@ -461,10 +460,7 @@ function update(time, delta) {
   if (gameState === 'upgrade') return;
   if (gameState === 'levelFailed') {
     if (Phaser.Input.Keyboard.JustDown(enterKey)) {
-      this.physics.resume();
-      hideStats();
-      gameState = 'playing';
-      resetLevelOnly(this);
+      restartGame(this);
     }
     return;
   }
@@ -819,35 +815,12 @@ function startLevel(scene) {
   shotsPressed = 0; enemiesKilled = 0;
   spawnedAirborne = 0; spawnedCrawlers = 0;
   heat = 0; overheated = false;
-  pixelMeter = Math.min(getAmmoCap(), pixelMeter + upgradeAmmo * 10);
+  pixelMeter = Math.min(getAmmoCap(), pixelMeter + upgradeAmmo * 20);
   clearGroupsForNewLevel(scene);
   buildFloors(scene);
   ammoPacksDroppedThisLevel = 0;
   ammoPackCooldownUntil = 0;
   allowPackThisLevel = Math.random() < 0.5; // ~one pack every two levels on average
-  powerUpQuotaThisLevel = decidePowerUpQuota(level);
-  powerUpsGrantedThisLevel = 0;
-  clearStuckMetadata();
-  windActive = false; windStrength = 0; windUntil = 0; nextWindTime = 0;
-  hazardActive = false; hazardUntil = 0; nextHazardTime = 0; hazardWarnUntil = 0;
-  hazardSafeWindow = null;
-  if (hazardSafeZoneSprite) { hazardSafeZoneSprite.destroy(); hazardSafeZoneSprite = null; }
-  levelWrapReadyAt = 0;
-  updateComboIndicators(scene, scene.time.now);
-}
-
-function resetLevelOnly(scene) {
-  const baseCfg = getLevelCfg() || levelConfig[levelConfig.length - 1];
-  const scale = getDifficultyScale(level);
-  enemiesToSpawn = Math.max(10, Math.round(baseCfg.enemies * scale));
-  levelScore = 0; shotsFired = 0; shotsHit = 0;
-  shotsPressed = 0; enemiesKilled = 0;
-  spawnedAirborne = 0; spawnedCrawlers = 0;
-  heat = 0; overheated = false;
-  pixelMeter = Math.min(getAmmoCap(), Math.max(30, pixelMeter + upgradeAmmo * 6));
-  clearGroupsForNewLevel(scene);
-  buildFloors(scene);
-  ammoPacksDroppedThisLevel = 0; // allow packs again on retry
   powerUpQuotaThisLevel = decidePowerUpQuota(level);
   powerUpsGrantedThisLevel = 0;
   clearStuckMetadata();
@@ -1495,24 +1468,51 @@ function heartTouchesFloor(heart, seg){
   hearts.killAndHide(heart); if (heart.body) heart.body.enable = false;
 }
 
+function formatOverlayMessage(msg){
+  const levelLine = `LEVEL ${level}`;
+  return msg ? `${levelLine}\n${msg}` : levelLine;
+}
+
+function refreshPauseOverlay(extraLine = ''){
+  if (!overlayText) return;
+  const msg = extraLine ? `${PAUSE_BASE_TEXT}\n${extraLine}` : PAUSE_BASE_TEXT;
+  overlayText.setText(formatOverlayMessage(msg));
+  overlayText.setVisible(true);
+  if (statsText) statsText.setVisible(false);
+}
+
 function togglePause(scene) {
   paused = !paused;
   scene.physics.world.isPaused = paused;
-  if (paused) overlayText.setText('PAUSED\nESC: RESUME   SPACE: RESTART');
-  else overlayText.setText('');
-  overlayText.setVisible(paused);
-  statsText.setVisible(false);
+  if (!overlayText) return;
+  if (paused) refreshPauseOverlay();
+  else {
+    overlayText.setText('');
+    overlayText.setVisible(false);
+  }
+  if (statsText) statsText.setVisible(false);
 }
 
 function showOverlay(scene, msg, autoHideMs = 0) {
-  overlayText.setText(msg); overlayText.setVisible(true); statsText.setVisible(false);
-  if (autoHideMs > 0) scene.time.addEvent({ delay: autoHideMs, callback: () => overlayText.setVisible(false) });
+  if (!overlayText) return;
+  if (!msg) { overlayText.setVisible(false); return; }
+  overlayText.setText(formatOverlayMessage(msg));
+  overlayText.setVisible(true);
+  if (statsText) statsText.setVisible(false);
+  if (autoHideMs > 0) {
+    scene.time.addEvent({ delay: autoHideMs, callback: () => overlayText.setVisible(false) });
+  }
 }
 function showStats(scene, title, acc, hits, lvlScore, footer){
-  overlayText.setText(title); statsText.setText(`Hits: ${hits}   Accuracy: ${acc}%   Level Score: ${lvlScore}\n${footer}`);
+  if (!overlayText || !statsText) return;
+  overlayText.setText(formatOverlayMessage(title));
+  statsText.setText(`Hits: ${hits}   Accuracy: ${acc}%   Level Score: ${lvlScore}\n${footer}`);
   overlayText.setVisible(true); statsText.setVisible(true);
 }
-function hideStats(){ overlayText.setVisible(false); statsText.setVisible(false); }
+function hideStats(){
+  if (overlayText) overlayText.setVisible(false);
+  if (statsText) statsText.setVisible(false);
+}
 
 function restartGame(scene) {
   resetGlobalFlags(scene);
@@ -1846,7 +1846,7 @@ function maybeFinalizeLevel(scene, now, hostilesRemaining){
       } else {
         gameState = 'levelFailed';
         clearPowerUpsForTransition(scene);
-        showStats(scene, `LEVEL ${level} FAILED`, acc, enemiesKilled, levelScore, 'ENTER: RETRY');
+        showStats(scene, `LEVEL ${level} FAILED`, acc, enemiesKilled, levelScore, 'ENTER: RESTART RUN');
         scene.physics.pause();
       }
     }
@@ -2015,7 +2015,20 @@ function openCheatPowerSelect(scene){
     else scene.physics.pause();
     paused = prevPause;
     gameState = prevGameState;
-    if (applied !== null) showOverlay(scene, applied, 800);
+    if (paused) {
+      const extra = applied && applied !== '' ? applied : '';
+      refreshPauseOverlay(extra);
+      if (applied && applied !== '') {
+        scene.time.addEvent({
+          delay: 800,
+          callback: () => { if (paused) refreshPauseOverlay(); }
+        });
+      }
+    } else if (applied !== null) {
+      showOverlay(scene, applied, 800);
+    } else if (overlayText) {
+      overlayText.setVisible(false);
+    }
   };
 
   const applySelection = () => {
@@ -2119,7 +2132,20 @@ function cheatJumpToLevel(scene){
     scene.physics.resume();
     paused = prevPause;
     gameState = prevGameState;
-    if (msg) showOverlay(scene, msg, 600); else showOverlay(scene, '', 0);
+    if (paused) {
+      const extra = msg && msg !== '' ? msg : '';
+      refreshPauseOverlay(extra);
+      if (msg && msg !== '') {
+        scene.time.addEvent({
+          delay: 600,
+          callback: () => { if (paused) refreshPauseOverlay(); }
+        });
+      }
+    } else if (msg) {
+      showOverlay(scene, msg, 600);
+    } else if (overlayText) {
+      overlayText.setVisible(false);
+    }
   };
 
   const keyHandler = evt => {
@@ -2190,22 +2216,6 @@ function restoreGroupPhysics(group){
       item.body.velocity.y *= 0.6;
     }
   });
-}
-
-function startBackgroundMusic(scene){
-  if (!scene.sound || !scene.sound.context) return;
-  if (bgmOsc) return;
-  if (scene.sound.locked) { scene.sound.once('unlocked', () => startBackgroundMusic(scene)); return; }
-  const ctx = scene.sound.context;
-  bgmGain = ctx.createGain();
-  bgmGain.gain.value = 0.02;
-  bgmOsc = ctx.createOscillator();
-  bgmOsc.type = 'sine';
-  const base = 176;
-  bgmOsc.frequency.setValueAtTime(base, ctx.currentTime);
-  bgmOsc.detune.value = 6;
-  bgmOsc.connect(bgmGain).connect(ctx.destination);
-  bgmOsc.start();
 }
 
 function playFx(scene, freq, d=0.12, v=0.07){
