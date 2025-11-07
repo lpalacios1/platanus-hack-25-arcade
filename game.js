@@ -1203,20 +1203,14 @@ function finalizeUpgradeSelection(scene, key){
   let message = 'Skip';
   const option = key === 'a' ? 1 : key === 's' ? 2 : key === 'd' ? 3 : 0;
   if (option === 1) {
-    if (upgradeAmmo < 3) {
-      upgradeAmmo++;
-      message = `Ammo T${upgradeAmmo}`;
-    } else message = 'Ammo MAX';
+    upgradeAmmo++;
+    message = `Ammo Cap ${getAmmoCap()}`;
   } else if (option === 2) {
-    if (upgradeCooling < 3) {
-      upgradeCooling++;
-      message = `Cooling T${upgradeCooling}`;
-    } else message = 'Cooling MAX';
+    upgradeCooling++;
+    message = `Cooling Lv ${upgradeCooling}`;
   } else if (option === 3) {
-    if (upgradePower < 3) {
-      upgradePower++;
-      message = `Power T${upgradePower}`;
-    } else message = 'Power MAX';
+    upgradePower++;
+    message = `Power Lv ${upgradePower}`;
   }
   overlayText.setVisible(false);
   statsText.setVisible(false);
