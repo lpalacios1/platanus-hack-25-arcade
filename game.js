@@ -66,6 +66,20 @@ const PIXEL_PICKUP_VALUE = 1;    // value of each tiny ammo (used by clusters to
 const AMMO_PACK_VALUE = 40;
 const JUMP_VELOCITY = -240;
 const POWER_UP_DURATION = 10000;
+const tune = {
+  ammoBase: 100,
+  ammoStep: 20,
+  refillStep: 20,
+  heatFloor: 0.55,
+  heatStep: 0.12,
+  coolStep: 0.18,
+  comboBase: 2400,
+  comboStep: 260,
+  comboCap: 2200,
+  overdriveFill: 7,
+  overdriveFillScale: 1.5,
+  overdriveScore: 1.5
+};
 const POWER_UP_TYPES = [
   { key: 'immunity',    label: 'IMMUNITY',     short: 'IMM', color: 0xff66ff },
   { key: 'machineGun',  label: 'MACHINE GUN',  short: 'MG',  color: 0xffd500 },
@@ -193,7 +207,7 @@ function drawPattern(g, pattern, px, colorMap) {
       if (pattern[y][x] !== ' ')
         g.fillStyle(colorMap[pattern[y][x]], 1).fillRect(x * px, y * px, px, px);
 }
-function getAmmoCap(){ return 100 + upgradeAmmo * 20; }
+function getAmmoCap(){ return tune.ammoBase + upgradeAmmo * tune.ammoStep; }
 function addPixels(v)  { pixelMeter = Math.min(getAmmoCap(), Math.max(0, pixelMeter + v)); }
 function spendPixels(v){ pixelMeter = Math.max(0, pixelMeter - v); }
 function hasLevelCfg() { return level >= 1 && level <= levelConfig.length; }
@@ -483,8 +497,8 @@ function update(time, delta) {
   pruneExpiredPowerUps(nowMS);
   const machineGunTier = machineGunActive ? getPowerUpTier('machineGun') : 0;
   const laserTier = laserActive ? getPowerUpTier('laser') : 0;
-  const heatGain = Math.max(0.55, 1 - upgradeCooling * 0.12);
-  const coolingBoost = 1 + upgradeCooling * 0.18;
+  const heatGain = Math.max(tune.heatFloor, 1 - upgradeCooling * tune.heatStep);
+  const coolingBoost = 1 + upgradeCooling * tune.coolStep;
 
   if (cheatPowerKey && Phaser.Input.Keyboard.JustDown(cheatPowerKey)) openCheatPowerSelect(this);
   if (cheatLevelKey && Phaser.Input.Keyboard.JustDown(cheatLevelKey)) cheatJumpToLevel(this);
@@ -815,7 +829,7 @@ function startLevel(scene) {
   shotsPressed = 0; enemiesKilled = 0;
   spawnedAirborne = 0; spawnedCrawlers = 0;
   heat = 0; overheated = false;
-  pixelMeter = Math.min(getAmmoCap(), pixelMeter + upgradeAmmo * 20);
+  pixelMeter = Math.min(getAmmoCap(), pixelMeter + upgradeAmmo * tune.refillStep);
   clearGroupsForNewLevel(scene);
   buildFloors(scene);
   ammoPacksDroppedThisLevel = 0;
@@ -1187,7 +1201,7 @@ function openUpgradeMenu(scene){
   gameState = 'upgrade';
   scene.physics.pause();
   statsText.setVisible(false);
-  overlayText.setText('UPGRADE\nA Ammo+20\nS Cool-heat\nD Power+dmg\nSpace Skip');
+  overlayText.setText('UPGRADES STACK\nA Ammo Cap +20\nS Cooling Boost\nD Power Boost\nSPACE Skip');
   overlayText.setVisible(true);
   const keyboard = scene.input && scene.input.keyboard;
   const handler = evt => {
@@ -1212,8 +1226,8 @@ function finalizeUpgradeSelection(scene, key){
     upgradePower++;
     message = `Power Lv ${upgradePower}`;
   }
-  overlayText.setVisible(false);
-  statsText.setVisible(false);
+  hideOverlay();
+  if (statsText) statsText.setVisible(false);
   scene.physics.resume();
   gameState = 'playing';
   showOverlay(scene, message, 800);
@@ -1462,9 +1476,16 @@ function heartTouchesFloor(heart, seg){
   hearts.killAndHide(heart); if (heart.body) heart.body.enable = false;
 }
 
-function formatOverlayMessage(msg){
-  const levelLine = `LEVEL ${level}`;
-  return msg ? `${levelLine}\n${msg}` : levelLine;
+function formatOverlayMessage(msg, includeLevel = true){
+  if (!msg) return includeLevel ? `LEVEL ${level}` : '';
+  if (!includeLevel) return msg;
+  return `LEVEL ${level}\n${msg}`;
+}
+
+function hideOverlay(){
+  if (!overlayText) return;
+  overlayText.setText('');
+  overlayText.setVisible(false);
 }
 
 function refreshPauseOverlay(extraLine = ''){
@@ -1480,21 +1501,18 @@ function togglePause(scene) {
   scene.physics.world.isPaused = paused;
   if (!overlayText) return;
   if (paused) refreshPauseOverlay();
-  else {
-    overlayText.setText('');
-    overlayText.setVisible(false);
-  }
+  else hideOverlay();
   if (statsText) statsText.setVisible(false);
 }
 
-function showOverlay(scene, msg, autoHideMs = 0) {
+function showOverlay(scene, msg, autoHideMs = 0, includeLevel = true) {
   if (!overlayText) return;
-  if (!msg) { overlayText.setVisible(false); return; }
-  overlayText.setText(formatOverlayMessage(msg));
+  if (!msg) { hideOverlay(); return; }
+  overlayText.setText(formatOverlayMessage(msg, includeLevel));
   overlayText.setVisible(true);
   if (statsText) statsText.setVisible(false);
   if (autoHideMs > 0) {
-    scene.time.addEvent({ delay: autoHideMs, callback: () => overlayText.setVisible(false) });
+    scene.time.addEvent({ delay: autoHideMs, callback: () => hideOverlay() });
   }
 }
 function showStats(scene, title, acc, hits, lvlScore, footer){
@@ -1504,7 +1522,7 @@ function showStats(scene, title, acc, hits, lvlScore, footer){
   overlayText.setVisible(true); statsText.setVisible(true);
 }
 function hideStats(){
-  if (overlayText) overlayText.setVisible(false);
+  hideOverlay();
   if (statsText) statsText.setVisible(false);
 }
 
@@ -1704,7 +1722,7 @@ function scheduleEnvironmentalEvents(scene, now, delta){
     windStrength = Phaser.Math.Between(120, 200) * (Math.random() < 0.5 ? -1 : 1) * (1 + level * 0.05);
     windUntil = now + duration;
     nextWindTime = windUntil + Phaser.Math.Between(7000, 12000);
-    showOverlay(scene, windStrength > 0 ? 'WIND GUST →' : 'WIND GUST ←', 600);
+    showOverlay(scene, windStrength > 0 ? 'WIND GUST →' : 'WIND GUST ←', 600, false);
   } else if (windActive && now > windUntil){
     windActive = false;
     windStrength = 0;
@@ -1713,14 +1731,14 @@ function scheduleEnvironmentalEvents(scene, now, delta){
   if (level >= 10 && !hazardActive){
     if (now > nextHazardTime - 1700 && hazardWarnUntil < now){
       hazardWarnUntil = now + 1500;
-      showOverlay(scene, 'FLOOR SURGE INCOMING!', 1200);
+      showOverlay(scene, 'FLOOR SURGE INCOMING!', 1200, false);
     }
     if (now > nextHazardTime){
       hazardActive = true;
       hazardUntil = now + Phaser.Math.Between(2600, 4000);
       nextHazardTime = hazardUntil + Phaser.Math.Between(9000, 15000);
       prepareFloorHazard(scene);
-      showOverlay(scene, 'FLOOR CHARGED!', 800);
+      showOverlay(scene, 'FLOOR CHARGED!', 800, false);
     }
   } else if (hazardActive && now > hazardUntil){
     hazardActive = false;
@@ -1863,9 +1881,9 @@ function pruneExpiredPowerUps(now){
 function registerKill(scene, now){
   comboCount += 1;
   comboMultiplier = Math.min(6, 1 + Math.floor(comboCount / 6));
-  const bonusWindow = Math.min(2200, comboMultiplier * 260);
-  comboExpireAt = now + 2400 + bonusWindow;
-  const fill = 7 + comboMultiplier * 1.5;
+  const bonusWindow = Math.min(tune.comboCap, comboMultiplier * tune.comboStep);
+  comboExpireAt = now + tune.comboBase + bonusWindow;
+  const fill = tune.overdriveFill + comboMultiplier * tune.overdriveFillScale;
   overdriveMeter = Math.min(120, overdriveMeter + fill);
   if (overdriveActive) {
     overdriveUntil = Math.min(overdriveUntil + 450, now + 9000);
@@ -1922,7 +1940,7 @@ function getScoreMultiplier(now){
   if (isPowerUpActive('doublePoints', now)){
     mult *= dpTier >= 3 ? 4 : dpTier === 2 ? 3 : 2;
   }
-  if (overdriveActive) mult *= 1.5;
+  if (overdriveActive) mult *= tune.overdriveScore;
   mult *= 1 + (comboMultiplier - 1) * 0.18;
   return mult;
 }
@@ -2020,9 +2038,7 @@ function openCheatPowerSelect(scene){
       }
     } else if (applied !== null) {
       showOverlay(scene, applied, 800);
-    } else if (overlayText) {
-      overlayText.setVisible(false);
-    }
+    } else hideOverlay();
   };
 
   const applySelection = () => {
@@ -2089,6 +2105,7 @@ function cheatJumpToLevel(scene){
   if (gameState === 'pause-cheat') return;
   const prevPause = paused;
   const prevGameState = gameState;
+  const physicsWasPaused = scene.physics.world.isPaused;
   scene.physics.pause();
   paused = true;
   gameState = 'pause-cheat';
@@ -2111,19 +2128,27 @@ function cheatJumpToLevel(scene){
     pixelMeter = 100;
     lives = Math.max(lives, 1);
     resetGlobalFlags(scene);
-    scene.physics.resume();
-    paused = false;
-    gameState = 'playing';
+    const resumeState = prevGameState === 'pause-cheat' ? 'playing' : prevGameState;
+    paused = prevPause;
+    gameState = resumeState || 'playing';
     startLevel(scene);
     if (player) {
       player.setPosition(400, 520);
       player.setVelocity(0, 0);
     }
-    showOverlay(scene, `CHEAT: LEVEL ${level}`, 800);
+    if (physicsWasPaused) scene.physics.pause(); else scene.physics.resume();
+    const msg = `CHEAT: LEVEL ${level}`;
+    if (paused) {
+      refreshPauseOverlay(msg);
+      scene.time.addEvent({
+        delay: 800,
+        callback: () => { if (paused) refreshPauseOverlay(); }
+      });
+    } else showOverlay(scene, msg, 800);
   };
 
   const cancel = msg => {
-    scene.physics.resume();
+    if (physicsWasPaused) scene.physics.pause(); else scene.physics.resume();
     paused = prevPause;
     gameState = prevGameState;
     if (paused) {
@@ -2137,9 +2162,7 @@ function cheatJumpToLevel(scene){
       }
     } else if (msg) {
       showOverlay(scene, msg, 600);
-    } else if (overlayText) {
-      overlayText.setVisible(false);
-    }
+    } else hideOverlay();
   };
 
   const keyHandler = evt => {
