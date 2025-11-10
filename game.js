@@ -10,7 +10,10 @@ const config = {
 const game = new Phaser.Game(config);
 
 // === Globals ===
-let player, cursors, spaceKey, enterKey, pauseKey, cheatPowerKey, cheatLevelKey, cheatLivesKey;
+let player, cursors, spaceKey, enterKey, pauseKey, cheatPowerKey, cheatLevelKey, cheatLivesKey, upgradeKeyCool;
+const arcadeStick = { up:false, down:false, left:false, right:false, fire:false, pause:false, confirm:false };
+let arcadePauseLatch = false;
+let arcadeConfirmEdge = false;
 let bullets, enemyBullets, enemies, crawlers, pixels, hearts, stickies;
 let ammoPacks, ammoClusters, floors, powerUps;
 let ammoPackCooldownUntil = 0, ammoPacksDroppedThisLevel = 0;
@@ -40,17 +43,15 @@ let playerInvincible = false;
 let glitchUnlimitedLives = false;
 let levelWrapReadyAt = 0;
 let upgradeAmmo = 0, upgradeCooling = 0, upgradePower = 0;
-let upgradePending = false, upgradeMenuActive = false;
-let upKeyH = null;
-let cc=0;
-const PAUSE_BASE_TEXT = 'PAUSE O=GO J=RST';
+let upgradePending = false;
+const PAUSE_BASE_TEXT = 'PAUSED\nENTER (Keyboard) / START (Arcade): Resume\nJ: Restart Run';
+let cheatCooldown = 0;
 // inter-level stats
 let shotsFired = 0, shotsHit = 0;
 
 // anti-air-abuse (single jump + coyote time)
 let lastGroundedAt = 0;
 const COYOTE_MS = 120;
-let airJumpCharges = 0;
 let enemyUidCounter = 1;
 let powerUpQuotaThisLevel = 0;
 let powerUpsGrantedThisLevel = 0;
@@ -81,18 +82,26 @@ const tune = {
   oScale: 1.5,
   oScore: 1.5
 };
+const MG_COOLDOWN = 95;
+const LASER_COOLDOWN = 150;
+const MACHINE_GUN_PELLETS = 2;
+const MACHINE_GUN_SPREAD = 16;
+const MACHINE_GUN_VERTICAL = -580;
+const MACHINE_GUN_DAMAGE_BONUS = 1;
+const MACHINE_GUN_PIERCE_BONUS = 1;
+const LASER_WIDTH = 10;
+const LASER_DAMAGE_BASE = 5;
+const LASER_PIERCE_BASE = 70;
 const P1_MAP = { u:'w', d:'s', l:'a', r:'d', a:'u', b:'i', c:'o', x:'j', y:'k', z:'l' };
 const POWER_UP_TYPES = [
   { key: 'immunity',    label: 'IMMUNITY',     short: 'IMM', color: 0xff66ff },
   { key: 'machineGun',  label: 'MACHINE GUN',  short: 'MG',  color: 0xffd500 },
   { key: 'laser',       label: 'LASER',        short: 'LAS', color: 0x66ffff },
-  { key: 'doubleJump',  label: 'DOUBLE JUMP',  short: 'DJ',  color: 0x88ff66 },
   { key: 'magnet',      label: 'MAGNET',       short: 'MAG', color: 0xff8844 },
   { key: 'doubleAmmo',  label: 'DOUBLE AMMO',  short: 'DA',  color: 0xffff66 },
   { key: 'doublePoints',label: 'DOUBLE PTS',   short: 'DP',  color: 0xff44aa }
 ];
 const powerUpTimers = {};
-const powerUpStacks = {};
 
 function ammoPackDropChance(lv){ return lv <= 3 ? 0.18 : 0.22; }
 function heartDropChance(lv){ return lv <= 3 ? 0.07 : 0.1; }
@@ -292,20 +301,17 @@ function initializeSessionState(){
   spawnedAirborne = 0; spawnedCrawlers = 0;
   ammoPacksDroppedThisLevel = 0; ammoPackCooldownUntil = 0;
   allowPackThisLevel = false;
-  airJumpCharges = 0;
   windActive = false; windStrength = 0; windUntil = 0;
   nextWindTime = 0; hazardActive = false; hazardUntil = 0; hazardWarnUntil = 0;
   nextHazardTime = 0; lastHazardDamageTime = 0;
   hazardSafeWindow = null;
   if (hazardSafeZoneSprite) { hazardSafeZoneSprite.destroy(); hazardSafeZoneSprite = null; }
   for (const k in powerUpTimers) delete powerUpTimers[k];
-  for (const k in powerUpStacks) delete powerUpStacks[k];
   comboCount = 0; comboMultiplier = 1; comboExpireAt = 0;
   overdriveMeter = 0; overdriveActive = false; overdriveUntil = 0;
-  glitchUnlimitedLives = false;
   levelWrapReadyAt = 0;
   upgradeAmmo = 0; upgradeCooling = 0; upgradePower = 0;
-  upgradePending = false; upgradeMenuActive = false;
+  upgradePending = false;
 }
 
 function createProceduralTextures(scene){
@@ -389,14 +395,15 @@ function configureInput(scene){
   cheatPowerKey = scene.input.keyboard.addKey(K.C);
   cheatLevelKey = scene.input.keyboard.addKey(K.L);
   cheatLivesKey = scene.input.keyboard.addKey(K.U);
+  upgradeKeyCool = scene.input.keyboard.addKey(K.I);
 }
 
 function armCheatCooldown(scene){
   const base = scene && scene.time ? scene.time.now : 0;
-  cc = base + 250;
+  cheatCooldown = base + 250;
 }
 
-function calmC(scene){
+function calmCheat(scene){
   if (spaceKey && spaceKey.reset) spaceKey.reset();
   armCheatCooldown(scene);
 }
@@ -408,6 +415,33 @@ function normKey(value){
   if (raw === 'start1') return 'enter';
   return raw;
 }
+
+function bindArcadeControls(scene){
+  const map = {
+    P1U: ['up'], P1D: ['down'], P1L: ['left'], P1R: ['right'],
+    P1DL: ['down','left'], P1DR: ['down','right'],
+    P1A: ['fire'], P1B: ['fire'], P1C: ['fire'], P1X: ['fire'], P1Y: ['fire'], P1Z: ['fire'],
+    START1: ['confirm','pause']
+  };
+  scene.input.keyboard.on('keydown', evt => {
+    const slots = map[evt.key];
+    if (!slots) return;
+    slots.forEach(slot => {
+      arcadeStick[slot] = true;
+      if (slot === 'confirm') arcadeConfirmEdge = true;
+    });
+  });
+  scene.input.keyboard.on('keyup', evt => {
+    const slots = map[evt.key];
+    if (!slots) return;
+    slots.forEach(slot => {
+      arcadeStick[slot] = false;
+      if (slot === 'pause') arcadePauseLatch = false;
+      if (slot === 'confirm') arcadeConfirmEdge = false;
+    });
+  });
+}
+
 
 function createPhysicsGroups(scene){
   bullets      = scene.physics.add.group({ defaultKey: 'bullet', maxSize: 140 });
@@ -474,6 +508,7 @@ function create() {
   createProceduralTextures(this);
   createPlayerSprite(this);
   configureInput(this);
+  bindArcadeControls(this);
   createPhysicsGroups(this);
   createUI(this);
   setupCollisions(this);
@@ -481,8 +516,15 @@ function create() {
   updateComboIndicators(this, this.time.now);
 }
 function update(time, delta) {
-  if (Phaser.Input.Keyboard.JustDown(pauseKey) ||
-     ((gameState === 'playing' || paused) && Phaser.Input.Keyboard.JustDown(enterKey))) togglePause(this);
+  const cheatMenuActive = (gameState === 'pause-cheat-power' || gameState === 'pause-cheat');
+  const canPause = !cheatMenuActive && (gameState === 'playing' || paused);
+  const pausePressed = canPause && Phaser.Input.Keyboard.JustDown(pauseKey);
+  const startPause = canPause && Phaser.Input.Keyboard.JustDown(enterKey);
+  const stickPause = canPause && (!arcadePauseLatch && arcadeStick.pause);
+  if (pausePressed || startPause || stickPause) {
+    togglePause(this);
+    if (arcadeStick.pause) arcadePauseLatch = true;
+  }
   if (paused) { if (Phaser.Input.Keyboard.JustDown(spaceKey)) restartGame(this); return; }
 
   if (gameOver) {
@@ -490,17 +532,20 @@ function update(time, delta) {
     return;
   }
 
-  if (gameState === 'levelComplete') {
-    if (upgradePending && (Phaser.Input.Keyboard.JustDown(enterKey) || Phaser.Input.Keyboard.JustDown(spaceKey))) openUpgradeMenu(this);
-    else if (!upgradePending && (Phaser.Input.Keyboard.JustDown(enterKey) || Phaser.Input.Keyboard.JustDown(spaceKey))) {
-      hideStats();
-      gameState = 'playing';
-      startLevel(this);
+  const levelCleared = (gameState === 'levelComplete');
+  const confirmPressed = Phaser.Input.Keyboard.JustDown(enterKey) || Phaser.Input.Keyboard.JustDown(spaceKey) || consumeArcadeConfirmEdge();
+  if (levelCleared) {
+    if (upgradePending) {
+      const choice = detectUpgradeChoice();
+      if (choice) { applyUpgradeChoice(this, choice); return; }
+      if (confirmPressed) { applyUpgradeChoice(this, 'skip'); return; }
+    } else if (confirmPressed) {
+      applyUpgradeChoice(this, 'skip');
+      return;
     }
   }
-  if (gameState === 'upgrade') return;
   if (gameState === 'levelFailed') {
-    if (Phaser.Input.Keyboard.JustDown(enterKey)) {
+    if (confirmPressed) {
       restartGame(this);
     }
     return;
@@ -509,84 +554,52 @@ function update(time, delta) {
   updateFloors(this, time, delta);
   updateFloatingCrawlers(this, time, delta);
 
-  // Ground/coyote
-  const onGround = player.body.blocked.down || player.body.touching.down || player.body.onFloor();
-  if (onGround) lastGroundedAt = time;
-
-  // Sticky check
   const nowMS = this.time.now;
   const stickyActive = nowMS < (player.getData('slowedUntil') || 0);
   const immunityActive = isPowerUpActive('immunity', nowMS);
   const machineGunActive = isPowerUpActive('machineGun', nowMS);
   const laserActive = isPowerUpActive('laser', nowMS);
   const magnetActive = isPowerUpActive('magnet', nowMS);
-  const doubleJumpActive = isPowerUpActive('doubleJump', nowMS);
   pruneExpiredPowerUps(nowMS);
-  const machineGunTier = machineGunActive ? getPowerUpTier('machineGun') : 0;
-  const laserTier = laserActive ? getPowerUpTier('laser') : 0;
   const heatGain = Math.max(tune.heatFloor, 1 - upgradeCooling * tune.heatStep);
   const coolingBoost = 1 + upgradeCooling * tune.coolStep;
 
-  if (cheatPowerKey && Phaser.Input.Keyboard.JustDown(cheatPowerKey) && nowMS > cc) openCheatPowerSelect(this);
-  if (cheatLevelKey && Phaser.Input.Keyboard.JustDown(cheatLevelKey) && nowMS > cc) cheatJumpToLevel(this);
-  if (cheatLivesKey && Phaser.Input.Keyboard.JustDown(cheatLivesKey) && nowMS > cc) toggleUnlimitedLivesGlitch(this);
+  const playingState = (gameState === 'playing');
+  if (playingState && cheatPowerKey && Phaser.Input.Keyboard.JustDown(cheatPowerKey) && nowMS > cheatCooldown) openCheatMenu(this);
+  if (playingState && cheatLevelKey && Phaser.Input.Keyboard.JustDown(cheatLevelKey) && nowMS > cheatCooldown) cheatLevelWarp(this);
+  if (playingState && cheatLivesKey && Phaser.Input.Keyboard.JustDown(cheatLivesKey) && nowMS > cheatCooldown) toggleLifeCheat(this);
 
-  // Movement with sticky effect
-  const baseSpeed = overdriveActive ? 380 : 300;
-  const speed = stickyActive ? 80 : baseSpeed;
-  if (stickyActive) { player.setDragX(1500); player.setMaxVelocity(160, 1000); }
-  else { player.setDragX(0); player.setMaxVelocity(500, 2000); }
-  if (!immunityActive) {
-    if (stickyActive) player.setTint(0x66ccff); else player.clearTint();
-  }
+  const onGround = applyPlayerMovement(time, stickyActive, immunityActive);
 
-  if (cursors.left.isDown) player.setVelocityX(-speed);
-  else if (cursors.right.isDown) player.setVelocityX(speed);
-  else if (stickyActive) player.setVelocityX(player.body.velocity.x * 0.9);
-  else player.setVelocityX(0);
+  // UI texts refresh before potential early exit
+  ammoText.setText('Ammo: ' + pixelMeter);
+  livesText.setText(glitchUnlimitedLives ? 'Lives: ∞' : 'Lives: ' + lives);
+  scoreText.setText('Score: ' + score);
+  const dynTarget = getDynamicScoreTarget();
+  const ratio = Phaser.Math.Clamp(dynTarget > 0 ? (levelScore / dynTarget) : 0, 0, 1);
+  scoreProgressBar.clear();
+  scoreProgressBar.fillStyle(0x00ff00, 1).fillRect(584, 16, ratio * 200, 16);
 
-  const doubleJumpTier = doubleJumpActive ? getPowerUpTier('doubleJump') : 0;
-  const extraJumps = doubleJumpActive ? (doubleJumpTier >= 3 ? 2 : doubleJumpTier === 2 ? 1 : 0) : 0;
-  if (onGround) {
-    airJumpCharges = doubleJumpActive ? 1 + extraJumps : 0;
-  } else if (!doubleJumpActive && airJumpCharges > 0) {
-    airJumpCharges = 0;
-  }
-
-  // Single jump + coyote + optional air jump
-  if (Phaser.Input.Keyboard.JustDown(cursors.up)) {
-    const coyote = (onGround || time - lastGroundedAt <= COYOTE_MS);
-    if (coyote) {
-      player.setVelocityY(stickyActive ? JUMP_VELOCITY * 0.8 : JUMP_VELOCITY);
-    } else if (airJumpCharges > 0) {
-      airJumpCharges--;
-      player.setVelocityY(JUMP_VELOCITY);
-    }
-  }
-
-  if (!onGround && cursors.down.isDown) {
-    const fastFallCap = overdriveActive ? 820 : 700;
-    const boost = stickyActive ? 26 : 40;
-    const vy = player.body.velocity.y || 0;
-    player.setVelocityY(Math.min(fastFallCap, vy + boost));
+  if (levelCleared) {
+    if (magnetActive) attractPickupsToPlayer(player); else releasePickupAcceleration();
+    updatePowerUpText(powerUpText, nowMS);
+    return;
   }
 
   // Shooting
-  const fireHeld = spaceKey.isDown;
+  const fireHeld = spaceKey.isDown || arcadeStick.fire;
   const autoFire = (machineGunActive || laserActive) && !fireHeld;
   if (gameState === 'playing' && time > lastFired && (fireHeld || autoFire)) {
     const activeBullets = bullets.countActive(true);
     let cooldown = SHOT_COOLDOWN_MS;
     if (machineGunActive) {
-      const mgTempo = [0, 120, 95, 70];
-      cooldown = mgTempo[Math.min(machineGunTier, mgTempo.length - 1)] || 120;
+      cooldown = MG_COOLDOWN;
     } else if (laserActive) {
-      const laserTempo = [0, 180, 150, 120];
-      cooldown = laserTempo[Math.min(laserTier, laserTempo.length - 1)] || 180;
+      cooldown = LASER_COOLDOWN;
     } else if (overdriveActive) {
       cooldown = Math.max(220, SHOT_COOLDOWN_MS - comboMultiplier * 40);
     }
-    const pelletsPerShot = laserActive ? 1 : (machineGunActive ? (machineGunTier >= 3 ? 2 : 1) : PELLETS_PER_SHOT);
+    const pelletsPerShot = laserActive ? 1 : (machineGunActive ? MACHINE_GUN_PELLETS : PELLETS_PER_SHOT);
     const hasAmmo = machineGunActive || laserActive || pixelMeter > 0;
     const overdriveDamageBonus = overdriveActive ? 1 + Math.floor(comboMultiplier / 2) : 0;
     const overdrivePierceBonus = overdriveActive ? Math.max(0, Math.floor(comboMultiplier / 3)) : 0;
@@ -622,10 +635,9 @@ function update(time, delta) {
             b.setTexture('laser');
             const beamHeight = Math.max(120, player.y);
             const half = beamHeight * 0.5;
-            const beamWidth = 6 + laserTier * 2;
-            b.setDisplaySize(beamWidth, beamHeight);
+            b.setDisplaySize(LASER_WIDTH, beamHeight);
             if (b.body) {
-              b.body.setSize(beamWidth, beamHeight, true);
+              b.body.setSize(LASER_WIDTH, beamHeight, true);
               b.body.allowGravity = false;
               b.body.velocity.x = 0;
               b.body.velocity.y = 0;
@@ -633,8 +645,8 @@ function update(time, delta) {
             b.x = player.x;
             b.y = player.y - half;
             b.setAngle(0);
-            const laserDamage = 3 + Math.max(0, laserTier - 1) * 2 + overdriveDamageBonus + upgradePower;
-            const laserPierce = 40 + (laserTier > 0 ? (laserTier * 18) : 0) + overdrivePierceBonus * 12;
+            const laserDamage = LASER_DAMAGE_BASE + overdriveDamageBonus + upgradePower;
+            const laserPierce = LASER_PIERCE_BASE + overdrivePierceBonus * 12;
             b.setData('damage', laserDamage);
             b.setData('pierce', laserPierce);
             b.setData('beam', true);
@@ -644,18 +656,17 @@ function update(time, delta) {
             b.setTexture('bullet');
             b.setDisplaySize(4, 4);
             if (b.body) b.body.setSize(4, 4, true);
-            const verticalKick = machineGunActive ? -560 - machineGunTier * 15 : -520 - overdriveDamageBonus * 12;
+            const verticalKick = machineGunActive ? MACHINE_GUN_VERTICAL : -520 - overdriveDamageBonus * 12;
             b.body.velocity.y = verticalKick + Phaser.Math.Between(-40, 40);
             if (machineGunActive) {
-              const spread = Math.max(6, 26 - machineGunTier * 6);
-              b.body.velocity.x = Phaser.Math.Between(-spread, spread);
+              b.body.velocity.x = Phaser.Math.Between(-MACHINE_GUN_SPREAD, MACHINE_GUN_SPREAD);
             } else {
               b.body.velocity.x = Phaser.Math.Between(-80, 80);
             }
             b.setAngle(0);
-            const bonusDamage = (machineGunActive ? Math.max(0, machineGunTier - 1) : 0) + overdriveDamageBonus + upgradePower;
+            const bonusDamage = (machineGunActive ? MACHINE_GUN_DAMAGE_BONUS : 0) + overdriveDamageBonus + upgradePower;
             const baseDamage = 1 + bonusDamage;
-            const pierceBonus = (machineGunActive ? Math.max(0, machineGunTier - 1) : 0) + overdrivePierceBonus;
+            const pierceBonus = (machineGunActive ? MACHINE_GUN_PIERCE_BONUS : 0) + overdrivePierceBonus;
             b.setData('damage', baseDamage);
             b.setData('pierce', pierceBonus);
             b.setData('beam', false);
@@ -679,17 +690,6 @@ function update(time, delta) {
     heat = Math.max(0, heat - (delta * coolRate * coolingBoost));
   }
   if (overheated && heat <= 40) overheated = false;
-
-  // UI texts
-  ammoText.setText('Ammo: ' + pixelMeter);
-  livesText.setText(glitchUnlimitedLives ? 'Lives: ∞' : 'Lives: ' + lives);
-  scoreText.setText('Score: ' + score);
-
-  // Score progress bar (dynamic target: stable per level, based on configured enemies)
-  const dynTarget = getDynamicScoreTarget();
-  const ratio = Phaser.Math.Clamp(dynTarget > 0 ? (levelScore / dynTarget) : 0, 0, 1);
-  scoreProgressBar.clear();
-  scoreProgressBar.fillStyle(0x00ff00, 1).fillRect(584, 16, ratio * 200, 16);
 
   // Spawning (mix airborne and crawlers)
   if (enemiesToSpawn > 0 && time > spawnTimer) {
@@ -847,8 +847,47 @@ function update(time, delta) {
   updatePowerUpText(powerUpText, nowMS);
 }
 
+function applyPlayerMovement(time, stickyActive, immunityActive){
+  if (!player || !player.body) return false;
+  const body = player.body;
+  const onGround = body.blocked.down || body.touching.down || body.onFloor();
+  if (onGround) lastGroundedAt = time;
+
+  const baseSpeed = overdriveActive ? 380 : 300;
+  const speed = stickyActive ? 80 : baseSpeed;
+  if (stickyActive) { player.setDragX(1500); player.setMaxVelocity(160, 1000); }
+  else { player.setDragX(0); player.setMaxVelocity(500, 2000); }
+  if (!immunityActive) {
+    if (stickyActive) player.setTint(0x66ccff); else player.clearTint();
+  }
+
+  const leftDown = cursors.left.isDown || arcadeStick.left;
+  const rightDown = cursors.right.isDown || arcadeStick.right;
+  if (leftDown) player.setVelocityX(-speed);
+  else if (rightDown) player.setVelocityX(speed);
+  else if (stickyActive) player.setVelocityX(body.velocity.x * 0.9);
+  else player.setVelocityX(0);
+
+  const upPressed = Phaser.Input.Keyboard.JustDown(cursors.up) || (arcadeStick.up && !body.wasUp);
+  body.wasUp = arcadeStick.up;
+  if (upPressed) {
+    const coyote = (onGround || time - lastGroundedAt <= COYOTE_MS);
+    if (coyote) player.setVelocityY(stickyActive ? JUMP_VELOCITY * 0.8 : JUMP_VELOCITY);
+  }
+
+  if (!onGround && (cursors.down.isDown || arcadeStick.down)) {
+    const fastFallCap = overdriveActive ? 820 : 700;
+    const boost = stickyActive ? 26 : 40;
+    const vy = body.velocity.y || 0;
+    player.setVelocityY(Math.min(fastFallCap, vy + boost));
+  }
+
+  return onGround;
+}
+
 // === Game logic helpers ===
 function startLevel(scene) {
+  calmPlayerMotion();
   const baseCfg = getLevelCfg() || levelConfig[levelConfig.length - 1];
   const scale = getDifficultyScale(level);
   enemiesToSpawn = Math.max(10, Math.round(baseCfg.enemies * scale));
@@ -872,6 +911,25 @@ function startLevel(scene) {
   if (hazardSafeZoneSprite) { hazardSafeZoneSprite.destroy(); hazardSafeZoneSprite = null; }
   levelWrapReadyAt = 0;
   updateComboIndicators(scene, scene.time.now);
+}
+
+function calmPlayerMotion(){
+  const body = player && player.body;
+  if (body){
+    player.setVelocity(0);
+    if (body.setAcceleration) body.setAcceleration(0);
+    body.allowGravity = true;
+    body.moves = true;
+  }
+  arcadeStick.fire = arcadeStick.up = arcadeStick.down = arcadeStick.left = arcadeStick.right = false;
+}
+
+function consumeArcadeConfirmEdge(){
+  if (arcadeConfirmEdge){
+    arcadeConfirmEdge = false;
+    return true;
+  }
+  return false;
 }
 
 function clearGroupsForNewLevel(scene) {
@@ -1203,7 +1261,7 @@ function playerHitAmmoPack(player, pack){
   const cap = getAmmoCap();
   if (pixelMeter >= cap) addPixels(val);
   else pixelMeter = cap;
-  showOverlay(scene, 'MAX AMMO', 500);
+  showOverlay(scene, 'MAX AMMO', 500, false);
 }
 
 function playerOnMovingFloor(player, seg){
@@ -1222,53 +1280,35 @@ function playerOnMovingFloor(player, seg){
   body.touching.down = true;
 }
 
-function openUpgradeMenu(scene){
-  if (upgradeMenuActive) return;
-  upgradeMenuActive = true;
-  upgradePending = false;
-  gameState = 'upgrade';
-  scene.physics.pause();
-  statsText.setVisible(false);
-  overlayText.setText('U AM\nI CL\nO PW\nL SK');
-  overlayText.setVisible(true);
-  const keyboard = scene.input && scene.input.keyboard;
-  const handler = evt => {
-    if (!upgradeMenuActive) return;
-    const key = evt.key.toLowerCase();
-    if (key === 'a' || key === 'u') finalizeUpgradeSelection(scene, 'u');
-    else if (key === 's' || key === 'i') finalizeUpgradeSelection(scene, 'i');
-    else if (key === 'd' || key === 'o') finalizeUpgradeSelection(scene, 'o');
-    else if (key === ' ' || key === 'l') finalizeUpgradeSelection(scene, 'l');
-  };
-  upKeyH = handler;
-  if (keyboard) keyboard.on('keydown', handler);
+function detectUpgradeChoice(){
+  if (cheatLivesKey && Phaser.Input.Keyboard.JustDown(cheatLivesKey)) return 'ammo'; // 'U' key / P1A
+  if (upgradeKeyCool && Phaser.Input.Keyboard.JustDown(upgradeKeyCool)) return 'cool'; // 'I' key / P1B
+  if (pauseKey && Phaser.Input.Keyboard.JustDown(pauseKey)) return 'power'; // 'O' key / P1C (ignored for pause here)
+  return null;
 }
 
-function finalizeUpgradeSelection(scene, key){
-  upgradeMenuActive = false;
-  if (upKeyH && scene.input && scene.input.keyboard){
-    scene.input.keyboard.off('keydown', upKeyH);
-    upKeyH = null;
-  }
-  let message = 'Skip';
-  let option = 0;
-  if (key === 'u') option = 1;
-  else if (key === 'i') option = 2;
-  else if (key === 'o') option = 3;
-  if (option === 1) {
+function applyUpgradeChoice(scene, key){
+  hideStats();
+  let message = 'READY';
+  if (key === 'ammo') {
     upgradeAmmo++;
-    message = `Ammo Cap ${getAmmoCap()}`;
-  } else if (option === 2) {
+    const cap = getAmmoCap();
+    pixelMeter = Math.min(cap, pixelMeter + tune.ammoStep);
+    message = `Ammo +${tune.ammoStep} (Cap ${cap})`;
+  } else if (key === 'cool') {
     upgradeCooling++;
     message = `Cooling Lv ${upgradeCooling}`;
-  } else if (option === 3) {
+  } else if (key === 'power') {
     upgradePower++;
     message = `Power Lv ${upgradePower}`;
+  } else if (key === 'skip') {
+    message = 'Next Level';
   }
-  hideOverlay();
-  if (statsText) statsText.setVisible(false);
-  scene.physics.resume();
+  upgradePending = false;
   gameState = 'playing';
+  if (cheatLivesKey && cheatLivesKey.reset) cheatLivesKey.reset();
+  const now = (scene.time && scene.time.now) ? scene.time.now : 0;
+  cheatCooldown = now + 600;
   showOverlay(scene, message, 800);
   startLevel(scene);
 }
@@ -1278,12 +1318,9 @@ function collectPowerUp(player, power){
   const scene = power.scene;
   const type = power.getData('type');
   powerUps.killAndHide(power); if (power.body) power.body.enable = false;
-  const tier = grantPowerUp(scene, type, POWER_UP_DURATION);
+  grantPowerUp(scene, type, POWER_UP_DURATION);
   const def = getPowerUpDef(type);
-  if (def) {
-    const suffix = tier > 1 ? ` TIER ${tier}` : '';
-    showOverlay(scene, 'POWER-UP: ' + def.label + suffix, 800);
-  }
+  if (def) showOverlay(scene, 'PWR ' + def.short, 800);
 }
 
 function maybeDropPowerUp(scene, x, y){
@@ -1581,6 +1618,7 @@ function resetGlobalFlags(scene){
   overdriveMeter = 0;
   overdriveUntil = 0;
   glitchUnlimitedLives = false;
+  cheatCooldown = 0;
   windActive = false;
   windStrength = 0;
   windUntil = 0;
@@ -1593,21 +1631,18 @@ function resetGlobalFlags(scene){
   if (hazardSafeZoneSprite) { hazardSafeZoneSprite.destroy(); hazardSafeZoneSprite = null; }
   levelWrapReadyAt = 0;
   upgradePending = false;
-  upgradeMenuActive = false;
   if (player) { player.setAlpha(1); player.clearTint(); }
   setFloorHazardState(scene || (player && player.scene) || null, false);
   for (const key in powerUpTimers) delete powerUpTimers[key];
-  for (const key in powerUpStacks) delete powerUpStacks[key];
   const now = scene && scene.time ? scene.time.now : (game && game.loop ? game.loop.now : 0);
   updateComboIndicators(scene || null, now);
 }
 
 function clearPowerUpsForTransition(scene){
   for (const key in powerUpTimers) powerUpTimers[key] = 0;
-  for (const key in powerUpStacks) powerUpStacks[key] = 0;
-  airJumpCharges = 0;
   releasePickupAcceleration();
   if (powerUps) powerUps.clear(true, true);
+  cleanupPlayerProjectiles();
   if (scene && scene.time) updatePowerUpText(powerUpText, scene.time.now);
   clearFloorHazard(scene || (player && player.scene) || null);
   hazardActive = false;
@@ -1890,14 +1925,16 @@ function maybeFinalizeLevel(scene, now, hostilesRemaining){
       const dynTarget = getDynamicScoreTarget();
       if (levelScore >= dynTarget) {
         gameState = 'levelComplete';
+        calmPlayerMotion();
+        cleanupPlayerProjectiles();
         clearPowerUpsForTransition(scene);
         upgradePending = true;
-        showStats(scene, `LEVEL ${level} CLEAR`, acc, enemiesKilled, levelScore, 'ENTER');
+        showStats(scene, `LEVEL ${level} CLEAR`, acc, enemiesKilled, levelScore, 'U/P1A: Ammo  I/P1B: Cool  O/P1C: Power  ENTER/START: Skip');
         level++;
       } else {
         gameState = 'levelFailed';
         clearPowerUpsForTransition(scene);
-        showStats(scene, `LEVEL ${level} FAILED`, acc, enemiesKilled, levelScore, 'ENTER: RESTART RUN');
+        showStats(scene, `LEVEL ${level} FAILED`, acc, enemiesKilled, levelScore, 'ENTER/START: RESTART RUN');
         scene.physics.pause();
       }
     }
@@ -1906,13 +1943,10 @@ function maybeFinalizeLevel(scene, now, hostilesRemaining){
   }
 }
 
-function getPowerUpTier(type){ return powerUpStacks[type] || 0; }
-
 function pruneExpiredPowerUps(now){
   for (const key in powerUpTimers){
     if (powerUpTimers[key] <= now){
       delete powerUpTimers[key];
-      powerUpStacks[key] = 0;
     }
   }
 }
@@ -1975,257 +2009,29 @@ function resetComboState(scene){
 
 function getScoreMultiplier(now){
   let mult = 1;
-  const dpTier = getPowerUpTier('doublePoints');
-  if (isPowerUpActive('doublePoints', now)){
-    mult *= dpTier >= 3 ? 4 : dpTier === 2 ? 3 : 2;
-  }
+  if (isPowerUpActive('doublePoints', now)) mult *= 2;
   if (overdriveActive) mult *= tune.oScore;
   mult *= 1 + (comboMultiplier - 1) * 0.18;
   return mult;
 }
 
 function getDoubleAmmoMultiplier(now){
-  if (!isPowerUpActive('doubleAmmo', now)) return 1;
-  const tier = getPowerUpTier('doubleAmmo');
-  if (tier >= 3) return 4;
-  if (tier === 2) return 3;
-  return 2;
+  return isPowerUpActive('doubleAmmo', now) ? 2 : 1;
 }
 
 function grantPowerUp(scene, type, duration = POWER_UP_DURATION){
   const now = scene.time.now;
   const existing = powerUpTimers[type] || 0;
   const base = existing > now ? existing : now;
-  const tier = Math.min((powerUpStacks[type] || 0) + 1, 3);
-  powerUpStacks[type] = tier;
-  const extended = duration * (1 + 0.3 * (tier - 1));
-  powerUpTimers[type] = base + extended;
+  powerUpTimers[type] = base + duration;
 
-  if (type === 'doubleJump') {
-    const extra = tier >= 3 ? 2 : tier === 2 ? 1 : 0;
-    airJumpCharges = player.body.blocked.down ? 1 + extra : Math.max(airJumpCharges, 1 + extra);
-  }
   if (type === 'machineGun') { heat = 0; overheated = false; }
   if (type === 'immunity') { playerInvincible = false; player.setAlpha(1); }
 
   updatePowerUpText(powerUpText, now);
-  return tier;
+  return true;
 }
 
-function activateCheatAllPowerUps(scene){
-  const longDuration = POWER_UP_DURATION * 1000;
-  for (let i = 0; i < POWER_UP_TYPES.length; i++) {
-    grantPowerUp(scene, POWER_UP_TYPES[i].key, longDuration);
-  }
-  showOverlay(scene, 'CHEAT ENABLED: ALL POWER UPS', 800);
-}
-
-function openCheatPowerSelect(scene){
-  if (gameState === 'pause-cheat-power') return;
-  const prevPause = paused;
-  const prevGameState = gameState;
-  const physicsWasPaused = scene.physics.world.isPaused;
-  scene.physics.pause();
-  paused = true;
-  gameState = 'pause-cheat-power';
-
-  const now = scene.time.now;
-  const selected = new Set();
-  for (let i = 0; i < POWER_UP_TYPES.length; i++) {
-    if (isPowerUpActive(POWER_UP_TYPES[i].key, now)) selected.add(i);
-  }
-
-  let cursor = 0;
-  const helper = scene.add.text(400, 300, '', {
-    fontSize: '22px',
-    fill: '#ffec99',
-    backgroundColor: '#000'
-  }).setOrigin(0.5).setDepth(200);
-
-  const render = () => {
-    let txt = 'WS J/U TG K OK L BK';
-    for (let i = 0; i < POWER_UP_TYPES.length; i++) {
-      const def = POWER_UP_TYPES[i];
-      const marker = selected.has(i) ? '+' : '-';
-      const pointer = i === cursor ? '>' : ' ';
-      txt += `\n${pointer}${marker}${def.short}`;
-    }
-    helper.setText(txt);
-  };
-  render();
-
-  const finalize = applied => {
-    scene.input.keyboard.off('keydown', keyHandler);
-    helper.destroy();
-    hideStats();
-    calmC(scene);
-    if (!physicsWasPaused) scene.physics.resume();
-    else scene.physics.pause();
-    paused = prevPause;
-    gameState = prevGameState;
-    if (paused) {
-      const extra = applied && applied !== '' ? applied : '';
-      refreshPauseOverlay(extra);
-      if (applied && applied !== '') {
-        scene.time.addEvent({
-          delay: 800,
-          callback: () => { if (paused) refreshPauseOverlay(); }
-        });
-      }
-    } else if (applied !== null) {
-      showOverlay(scene, applied, 800);
-    } else hideOverlay();
-  };
-
-  const applySelection = () => {
-    const longDuration = POWER_UP_DURATION * 1000;
-    const magnetIndex = POWER_UP_TYPES.findIndex(def => def.key === 'magnet');
-    let appliedCount = 0;
-    for (let i = 0; i < POWER_UP_TYPES.length; i++) {
-      const def = POWER_UP_TYPES[i];
-      if (selected.has(i)) {
-        powerUpStacks[def.key] = 0;
-        powerUpTimers[def.key] = 0;
-        for (let tier = 0; tier < 3; tier++) grantPowerUp(scene, def.key, longDuration);
-        appliedCount++;
-      } else {
-        powerUpTimers[def.key] = 0;
-        powerUpStacks[def.key] = 0;
-      }
-    }
-    if (magnetIndex >= 0 && !selected.has(magnetIndex)) releasePickupAcceleration();
-    updatePowerUpText(powerUpText, scene.time.now);
-    const msg = appliedCount > 0 ? `CHEAT ${appliedCount}` : 'CHEAT OFF';
-    finalize(msg);
-  };
-
-  const cancel = () => finalize('CHEAT CANX');
-
-  const moveCursor = dir => {
-    const count = POWER_UP_TYPES.length;
-    cursor = (cursor + dir + count) % count;
-    render();
-  };
-
-  const toggleCursor = () => {
-    if (selected.has(cursor)) selected.delete(cursor); else selected.add(cursor);
-    render();
-  };
-
-  const keyHandler = evt => {
-    const key = normKey(evt.key);
-    if (key === 'w') moveCursor(-1);
-    else if (key === 's') moveCursor(1);
-    else if (key === 'j' || key === 'u') toggleCursor();
-    else if (key === 'k' || key === 'enter') applySelection();
-    else if (key === 'l' || key === 'escape') cancel();
-  };
-
-  scene.input.keyboard.on('keydown', keyHandler);
-}
-
-function toggleUnlimitedLivesGlitch(scene){
-  glitchUnlimitedLives = !glitchUnlimitedLives;
-  if (glitchUnlimitedLives) {
-    lives = Math.max(lives, 3);
-    showOverlay(scene, 'GLITCH ENABLED: ∞ LIVES', 900);
-  } else {
-    if (lives <= 0) lives = 1;
-    showOverlay(scene, 'GLITCH DISABLED', 600);
-  }
-  if (livesText) livesText.setText(glitchUnlimitedLives ? 'Lives: ∞' : 'Lives: ' + lives);
-}
-
-function cheatJumpToLevel(scene){
-  if (gameState === 'pause-cheat') return;
-  const prevPause = paused;
-  const prevGameState = gameState;
-  const physicsWasPaused = scene.physics.world.isPaused;
-  scene.physics.pause();
-  paused = true;
-  gameState = 'pause-cheat';
-
-  const helper = scene.add.text(400, 300, '', {
-    fontSize: '24px',
-    fill: '#ffff66',
-    backgroundColor: '#000'
-  }).setOrigin(0.5).setDepth(200);
-
-  let targetLevel = Math.max(1, level);
-  const render = () => {
-    helper.setText(`LVL${targetLevel}\nWS+/-1\nJ/EN OK L BK`);
-  };
-  render();
-
-  let keyHandler;
-  const closeCheatPrompt = () => {
-    if (keyHandler) scene.input.keyboard.off('keydown', keyHandler);
-    helper.destroy();
-    hideStats();
-  };
-
-  const applyTarget = () => {
-    closeCheatPrompt();
-    level = Math.max(1, targetLevel);
-    clearPowerUpsForTransition(scene);
-    pixelMeter = 100;
-    lives = Math.max(lives, 1);
-    resetGlobalFlags(scene);
-    const resumeState = prevGameState === 'pause-cheat' ? 'playing' : prevGameState;
-    paused = prevPause;
-    gameState = resumeState || 'playing';
-    startLevel(scene);
-    if (player) {
-      player.setPosition(400, 520);
-      player.setVelocity(0, 0);
-    }
-    if (physicsWasPaused) scene.physics.pause(); else scene.physics.resume();
-    const msg = `CHEAT: LEVEL ${level}`;
-    if (paused) {
-      refreshPauseOverlay(msg);
-      scene.time.addEvent({
-        delay: 800,
-        callback: () => { if (paused) refreshPauseOverlay(); }
-      });
-    } else showOverlay(scene, msg, 800);
-    calmC(scene);
-  };
-
-  const cancel = msg => {
-    closeCheatPrompt();
-    if (physicsWasPaused) scene.physics.pause(); else scene.physics.resume();
-    paused = prevPause;
-    gameState = prevGameState;
-    if (paused) {
-      const extra = msg && msg !== '' ? msg : '';
-      refreshPauseOverlay(extra);
-      if (msg && msg !== '') {
-        scene.time.addEvent({
-          delay: 600,
-          callback: () => { if (paused) refreshPauseOverlay(); }
-        });
-      }
-    } else if (msg) {
-      showOverlay(scene, msg, 600);
-    } else hideOverlay();
-    calmC(scene);
-  };
-
-  const adjustLevel = delta => {
-    targetLevel = Math.max(1, targetLevel + delta);
-    render();
-  };
-
-  keyHandler = evt => {
-    const key = normKey(evt.key);
-    if (key === 'w') adjustLevel(1);
-    else if (key === 's') adjustLevel(-1);
-    else if (key === 'j' || key === 'enter') applyTarget();
-    else if (key === 'l' || key === 'escape') cancel('CHEAT CANX');
-  };
-
-  scene.input.keyboard.on('keydown', keyHandler);
-}
 
 function pullGroupToward(group, target, speed, lerp){
   if (!group) return;
@@ -2244,9 +2050,8 @@ function pullGroupToward(group, target, speed, lerp){
 }
 
 function attractPickupsToPlayer(target){
-  const tier = getPowerUpTier('magnet');
-  const speedMult = 1 + tier * 0.35;
-  const lerpBoost = tier * 0.05;
+  const speedMult = 1.3;
+  const lerpBoost = 0.08;
   pullGroupToward(pixels, target, 420 * speedMult, 0.35 + lerpBoost);
   pullGroupToward(ammoPacks, target, 360 * speedMult, 0.32 + lerpBoost);
   pullGroupToward(ammoClusters, target, 360 * speedMult, 0.32 + lerpBoost);
@@ -2256,6 +2061,16 @@ function releasePickupAcceleration(){
   restoreGroupPhysics(pixels);
   restoreGroupPhysics(ammoPacks);
   restoreGroupPhysics(ammoClusters);
+}
+
+function cleanupPlayerProjectiles(){
+  if (bullets) {
+    bullets.children.each(b => {
+      if (!b.active) return;
+      bullets.killAndHide(b);
+      if (b.body) b.body.enable = false;
+    });
+  }
 }
 
 function restoreGroupPhysics(group){
@@ -2297,9 +2112,7 @@ function updatePowerUpText(textObj, now){
     const expiry = powerUpTimers[def.key] || 0;
     if (expiry > now) {
       const remaining = Math.max(0, Math.ceil((expiry - now) / 1000));
-      const tier = getPowerUpTier(def.key);
-      const label = tier > 1 ? `${def.short}${tier} ${remaining}s` : `${def.short} ${remaining}s`;
-      active.push(label);
+      active.push(`${def.short} ${remaining}s`);
     }
   }
   if (active.length > 0) {
@@ -2309,4 +2122,155 @@ function updatePowerUpText(textObj, now){
     textObj.setText('');
     textObj.setVisible(false);
   }
+}
+
+function openCheatMenu(scene){
+  if (gameState === 'pause-cheat-power') return;
+  const prevPause = paused;
+  const prevState = gameState;
+  const physicsPaused = scene.physics.world.isPaused;
+  scene.physics.pause();
+  paused = true;
+  gameState = 'pause-cheat-power';
+
+  const now = scene.time.now;
+  const selected = new Set();
+  POWER_UP_TYPES.forEach((def, idx) => {
+    if (isPowerUpActive(def.key, now)) selected.add(idx);
+  });
+
+  let cursor = 0;
+  const helper = scene.add.text(400, 300, '', {
+    fontSize: '22px',
+    fill: '#ffec99',
+    align: 'center'
+  }).setDepth(200).setOrigin(0.5);
+
+  const render = () => {
+    let txt = 'CHEAT LOADER\nW/S: Move  J or P1A: Toggle\nA: Select All  D: Clear All\nK/ENTER: Apply  L: Cancel';
+    for (let i = 0; i < POWER_UP_TYPES.length; i++) {
+      const def = POWER_UP_TYPES[i];
+      const marker = `${i === cursor ? '>' : ' '} ${selected.has(i) ? '[x]' : '[ ]'} ${def.label}`;
+      txt += `\n${marker}`;
+    }
+    helper.setText(txt);
+  };
+  render();
+
+  const finish = msg => {
+    scene.input.keyboard.off('keydown', keyHandler);
+    helper.destroy();
+    hideStats();
+    calmCheat(scene);
+    if (!physicsPaused) scene.physics.resume(); else scene.physics.pause();
+    paused = prevPause;
+    gameState = prevState;
+    if (paused) refreshPauseOverlay(msg || '');
+    else if (msg) showOverlay(scene, msg, 800); else hideOverlay();
+  };
+
+  const applySelection = () => {
+    const longDuration = POWER_UP_DURATION * 1000;
+    let count = 0;
+    for (let i = 0; i < POWER_UP_TYPES.length; i++) {
+      const def = POWER_UP_TYPES[i];
+      if (selected.has(i)) {
+        powerUpTimers[def.key] = 0;
+        grantPowerUp(scene, def.key, longDuration);
+        count++;
+      } else {
+        powerUpTimers[def.key] = 0;
+      }
+    }
+    updatePowerUpText(powerUpText, scene.time.now);
+    finish(count > 0 ? `CHEAT ${count}` : 'OFF');
+  };
+
+  const cancel = () => finish('OFF');
+
+  const keyHandler = evt => {
+    const key = normKey(evt.key);
+    if (key === 'w') cursor = (cursor - 1 + POWER_UP_TYPES.length) % POWER_UP_TYPES.length;
+    else if (key === 's') cursor = (cursor + 1) % POWER_UP_TYPES.length;
+    else if (key === 'j' || key === 'u') selected.has(cursor) ? selected.delete(cursor) : selected.add(cursor);
+    else if (key === 'a') POWER_UP_TYPES.forEach((_, idx) => selected.add(idx));
+    else if (key === 'd') selected.clear();
+    else if (key === 'k' || key === 'enter') { applySelection(); return; }
+    else if (key === 'l' || key === 'escape') { cancel(); return; }
+    render();
+  };
+
+  scene.input.keyboard.on('keydown', keyHandler);
+}
+
+function toggleLifeCheat(scene){
+  glitchUnlimitedLives = !glitchUnlimitedLives;
+  livesText.setText(glitchUnlimitedLives ? 'Lives: ∞' : 'Lives: ' + lives);
+  showOverlay(scene, glitchUnlimitedLives ? '∞ LIVES' : 'OFF', 800);
+  calmCheat(scene);
+}
+
+function cheatLevelWarp(scene){
+  if (gameState === 'pause-cheat') return;
+  const prevPause = paused;
+  const prevState = gameState;
+  const physicsPaused = scene.physics.world.isPaused;
+  scene.physics.pause();
+  paused = true;
+  gameState = 'pause-cheat';
+
+  let targetLevel = Math.max(1, level);
+  const helper = scene.add.text(400, 300, '', {
+    fontSize: '24px',
+    fill: '#ffff66',
+    align: 'center'
+  }).setDepth(200).setOrigin(0.5);
+
+  const render = () => helper.setText(
+    `LEVEL ${targetLevel}\nW/S or Up/Down (P1 U/D): +/-1\nA or Left (P1 Left): -5   D or Right (P1 Right): +5\nJ or ENTER (P1 A): Confirm   L: Cancel`
+  );
+  render();
+
+  const close = () => {
+    scene.input.keyboard.off('keydown', keyHandler);
+    helper.destroy();
+    hideStats();
+  };
+
+  const applyTarget = () => {
+    close();
+    level = Math.max(1, targetLevel);
+    clearPowerUpsForTransition(scene);
+    pixelMeter = 100;
+    lives = Math.max(lives, 1);
+    resetGlobalFlags(scene);
+    paused = prevPause;
+    gameState = prevState || 'playing';
+    startLevel(scene);
+    if (player) { player.setPosition(400, 520); player.setVelocity(0, 0); }
+    if (physicsPaused) scene.physics.pause(); else scene.physics.resume();
+    showOverlay(scene, `LVL ${level}`, 800);
+    calmCheat(scene);
+  };
+
+  const cancel = msg => {
+    close();
+    if (physicsPaused) scene.physics.pause(); else scene.physics.resume();
+    paused = prevPause;
+    gameState = prevState;
+    if (msg) showOverlay(scene, msg, 600); else hideOverlay();
+    calmCheat(scene);
+  };
+
+  const keyHandler = evt => {
+    const key = normKey(evt.key);
+    if (key === 'w' || key === 'up') { targetLevel++; render(); }
+    else if (key === 's' || key === 'down') { targetLevel = Math.max(1, targetLevel - 1); render(); }
+    else if (key === 'a' || key === 'left') { targetLevel = Math.max(1, targetLevel - 5); render(); }
+    else if (key === 'd' || key === 'right') { targetLevel += 5; render(); }
+    else if (key === 'j' || key === 'enter') applyTarget();
+    else if (key === 'l' || key === 'escape') cancel('OFF');
+  };
+
+  scene.input.keyboard.on('keydown', keyHandler);
 }
