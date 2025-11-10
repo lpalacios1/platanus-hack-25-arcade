@@ -44,7 +44,7 @@ let glitchUnlimitedLives = false;
 let levelWrapReadyAt = 0;
 let upgradeAmmo = 0, upgradeCooling = 0, upgradePower = 0;
 let upgradePending = false;
-const PAUSE_BASE_TEXT = 'PAUSED\nENTER (Keyboard) / START (Arcade): Resume\nJ: Restart Run';
+const PAUSE_BASE_TEXT = 'PAUSED\nSTART: Resume   P1X: Restart';
 let cheatCooldown = 0;
 // inter-level stats
 let shotsFired = 0, shotsHit = 0;
@@ -83,15 +83,15 @@ const tune = {
   oScore: 1.5
 };
 const MG_COOLDOWN = 95;
-const LASER_COOLDOWN = 150;
+const LASER_COOLDOWN = 180;
 const MACHINE_GUN_PELLETS = 2;
 const MACHINE_GUN_SPREAD = 16;
 const MACHINE_GUN_VERTICAL = -580;
 const MACHINE_GUN_DAMAGE_BONUS = 1;
 const MACHINE_GUN_PIERCE_BONUS = 1;
 const LASER_WIDTH = 10;
-const LASER_DAMAGE_BASE = 5;
-const LASER_PIERCE_BASE = 70;
+const LASER_DAMAGE_BASE = 3;
+const LASER_PIERCE_BASE = 40;
 const P1_MAP = { u:'w', d:'s', l:'a', r:'d', a:'u', b:'i', c:'o', x:'j', y:'k', z:'l' };
 const POWER_UP_TYPES = [
   { key: 'immunity',    label: 'IMMUNITY',     short: 'IMM', color: 0xff66ff },
@@ -239,25 +239,25 @@ function getPowerUpDef(key){
   return null;
 }
 function decidePowerUpQuota(lv){
-  const opts = [0, 1, 2];
+  const opts = lv <= 3 ? [1, 2] : [1, 2, 3];
   let weights;
-  if (lv <= 2) weights = [0.75, 0.25, 0];
-  else if (lv <= 4) weights = [0.4, 0.45, 0.15];
-  else if (lv <= 6) weights = [0.25, 0.45, 0.30];
-  else weights = [0.15, 0.4, 0.45];
+  if (lv <= 2) weights = [0.7, 0.3];
+  else if (lv <= 4) weights = [0.45, 0.45, 0.10];
+  else if (lv <= 6) weights = [0.30, 0.45, 0.25];
+  else weights = [0.20, 0.40, 0.40];
   let roll = Math.random();
   for (let i = 0; i < opts.length; i++) {
     const w = weights[i] || 0;
     if (roll < w) return opts[i];
     roll -= w;
   }
-  return 0;
+  return opts[0];
 }
 function powerUpDropChanceForLevel(lv){
-  if (lv <= 2) return 0.09;
-  if (lv <= 4) return 0.12;
-  if (lv <= 6) return 0.16;
-  return 0.2;
+  if (lv <= 2) return 0.32;
+  if (lv <= 4) return 0.38;
+  if (lv <= 6) return 0.44;
+  return 0.52;
 }
 
 function requiredKillRatio(lv){
@@ -320,8 +320,8 @@ function createProceduralTextures(scene){
   gP.generateTexture('player', 10*3, 9*3); gP.destroy();
 
   genBananaTex(scene, 'enemy1', 14, 7, 2.8, 5.1, 0xffe066, 0x9a8700, 0x4caf50);
-  genBananaTex(scene, 'enemy2', 16, 8, 2.8, 5.1, 0xffd24d, 0x9a8700, 0x4caf50);
-  genBananaTex(scene, 'enemy3', 18, 9, 2.8, 5.1, 0xffc233, 0x9a8700, 0x4caf50);
+  genBananaTex(scene, 'enemy2', 16, 8, 2.8, 5.1, 0xb2782b, 0x6d3c05, 0x4caf50);
+  genBananaTex(scene, 'enemy3', 18, 9, 2.8, 5.1, 0x68c441, 0x2b6e1d, 0x4caf50);
 
   const gC = scene.add.graphics();
   drawPattern(gC, crawlerPattern, 2, { '4': 0x7a4a00, '0': 0x3a2200 });
@@ -754,7 +754,7 @@ function update(time, delta) {
   if (lives <= 0 && !gameOver) {
     gameOver = true; gameState = 'gameover'; this.physics.pause();
     clearPowerUpsForTransition(this);
-    showStats(this, 'GAME OVER', accuracyPct(), enemiesKilled, levelScore, 'ENTER/R: RESTART');
+    showStats(this, 'GAME OVER', accuracyPct(), enemiesKilled, levelScore, 'START: RESTART');
   }
 
   // Cleanup + beam upkeep
@@ -950,7 +950,7 @@ function clearGroupsForNewLevel(scene) {
 function endGameWin(scene, acc) {
   gameOver = true; gameState = 'gameover'; scene.physics.pause();
   clearPowerUpsForTransition(scene);
-  showStats(scene, 'YOU WIN!', acc, enemiesKilled, levelScore, 'ENTER/R: RESTART');
+  showStats(scene, 'YOU WIN!', acc, enemiesKilled, levelScore, 'START: RESTART');
 }
 
 function getFloorSegmentAt(scene, x){
@@ -1320,7 +1320,7 @@ function collectPowerUp(player, power){
   powerUps.killAndHide(power); if (power.body) power.body.enable = false;
   grantPowerUp(scene, type, POWER_UP_DURATION);
   const def = getPowerUpDef(type);
-  if (def) showOverlay(scene, 'PWR ' + def.short, 800);
+  if (def) showOverlay(scene, 'POWER UP: ' + def.label, 800);
 }
 
 function maybeDropPowerUp(scene, x, y){
@@ -1473,7 +1473,7 @@ function outOfAmmoLose(scene){
   gameState = 'gameover';
   clearPowerUpsForTransition(scene);
   scene.physics.pause();
-  showStats(scene, 'OUT OF AMMO', accuracyPct(), enemiesKilled, levelScore, 'ENTER/R: RESTART');
+  showStats(scene, 'OUT OF AMMO', accuracyPct(), enemiesKilled, levelScore, 'START: RESTART');
 }
 
 function buildFloors(scene){
@@ -1929,12 +1929,12 @@ function maybeFinalizeLevel(scene, now, hostilesRemaining){
         cleanupPlayerProjectiles();
         clearPowerUpsForTransition(scene);
         upgradePending = true;
-        showStats(scene, `LEVEL ${level} CLEAR`, acc, enemiesKilled, levelScore, 'U/P1A: Ammo  I/P1B: Cool  O/P1C: Power  ENTER/START: Skip');
+        showStats(scene, `LEVEL ${level} CLEAR`, acc, enemiesKilled, levelScore, 'P1A: Ammo  P1B: Cool  P1C: Power  START: Skip');
         level++;
       } else {
         gameState = 'levelFailed';
         clearPowerUpsForTransition(scene);
-        showStats(scene, `LEVEL ${level} FAILED`, acc, enemiesKilled, levelScore, 'ENTER/START: RESTART RUN');
+        showStats(scene, `LEVEL ${level} FAILED`, acc, enemiesKilled, levelScore, 'START: RESTART RUN');
         scene.physics.pause();
       }
     }
@@ -2147,7 +2147,7 @@ function openCheatMenu(scene){
   }).setDepth(200).setOrigin(0.5);
 
   const render = () => {
-    let txt = 'CHEAT LOADER\nW/S: Move  J or P1A: Toggle\nA: Select All  D: Clear All\nK/ENTER: Apply  L: Cancel';
+    let txt = 'CHEAT PANEL\nP1 Up/Down: Move   P1A: Toggle\nP1 Left: Select All   P1 Right: Clear All\nP1Y: Apply   P1Z: Cancel';
     for (let i = 0; i < POWER_UP_TYPES.length; i++) {
       const def = POWER_UP_TYPES[i];
       const marker = `${i === cursor ? '>' : ' '} ${selected.has(i) ? '[x]' : '[ ]'} ${def.label}`;
@@ -2227,7 +2227,7 @@ function cheatLevelWarp(scene){
   }).setDepth(200).setOrigin(0.5);
 
   const render = () => helper.setText(
-    `LEVEL ${targetLevel}\nW/S or Up/Down (P1 U/D): +/-1\nA or Left (P1 Left): -5   D or Right (P1 Right): +5\nJ or ENTER (P1 A): Confirm   L: Cancel`
+    `LEVEL ${targetLevel}\nP1 Up/Down: +/-1\nP1 Left: -5   P1 Right: +5\nP1A: Confirm   P1Z: Cancel`
   );
   render();
 
